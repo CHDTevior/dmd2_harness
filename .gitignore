@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.cache/
+outputs/
+checkpoints/
+wandb/
+*.log
+*.out
+*.err
+

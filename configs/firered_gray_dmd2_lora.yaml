@@ -1,0 +1,77 @@
+project:
+  name: firered_gray_dmd2_lora
+  output_dir: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/dmd2_firered_gray_lora_v1
+  report_dir: /vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_firered_porting_harness/reports
+
+model:
+  type: QwenImageEdit
+  base_model_path: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/ckpts
+  merged_gray_model_path: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/ckpts_gray_lora_merged_v1
+  teacher_adapter_path: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/ckpts/adapter_gray/adapter
+  lora_target_modules: to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1
+  student_lora_rank: 64
+  student_lora_alpha: 64
+  fake_critic_lora_rank: 64
+  fake_critic_lora_alpha: 64
+
+data:
+  jsonl: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/clay_meta/clay/clay.jsonl
+  local_data_root: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/cos_data_clay
+  source_image_field: source_image
+  target_image_field: edit_image
+  instruction_field: instruction
+  embedding_field: embeddings_tensor_en
+  uncond_embedding_field: embeddings_tensor_droptext
+  height: 512
+  width: 512
+  max_samples:
+  require_local_files: true
+  precompute_latents_dir: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/precomputed/dmd2_gray_latents_v1
+
+dmd2:
+  mode: lora
+  primary_num_steps: 4
+  candidate_num_steps: [1, 2, 4]
+  cfg_scale: 0
+  real_guidance_scale: 0
+  fake_guidance_scale: 1
+  dm_loss_weight: 1.0
+  gen_cls_loss_weight: 0.005
+  guidance_cls_loss_weight: 0.01
+  dfake_gen_update_ratio: 5
+  use_gan_classifier: true
+  use_backward_simulation: true
+
+train:
+  seed: 42
+  precision: bf16
+  micro_batch_size: 1
+  grad_accumulation_steps: 1
+  learning_rate_student: 1.0e-5
+  learning_rate_fake_critic: 1.0e-5
+  max_train_steps: 20000
+  dryrun_steps: 1
+  fastrun_steps: 100
+  save_every: 200
+  checkpoints_total_limit: 5
+  min_free_space_gb: 250
+
+eval:
+  enabled: true
+  start_step: 100
+  every_steps: 100
+  max_samples: 4
+  cfg_scale: 0
+  variants:
+    - label: orig_lora_vanilla_40
+      mode: teacher_vanilla
+      steps: 40
+    - label: dmd2_1nfe
+      mode: dmd2
+      steps: 1
+    - label: dmd2_2nfe
+      mode: dmd2
+      steps: 2
+    - label: dmd2_4nfe
+      mode: dmd2
+      steps: 4

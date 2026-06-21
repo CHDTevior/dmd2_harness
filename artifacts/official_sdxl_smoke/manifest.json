@@ -1,0 +1,20 @@
+{
+  "base_model": "/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_assets/sdxl-base-1.0-fp16",
+  "lora": "/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_assets/DMD2/dmd2_sdxl_4step_lora_fp16.safetensors",
+  "image": "/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_outputs/smoke_sdxl_lora_4step/dmd2_sdxl_lora_4step_smoke.png",
+  "prompt": "a photo of a small clay cat on a wooden table, studio lighting",
+  "seed": 20260622,
+  "height": 1024,
+  "width": 1024,
+  "steps": 4,
+  "guidance_scale": 0,
+  "timesteps": [
+    999,
+    749,
+    499,
+    249
+  ],
+  "dtype": "torch.float16",
+  "device": "cuda",
+  "torch": "2.6.0+cu124"
+}
