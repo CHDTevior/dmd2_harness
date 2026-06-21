@@ -41,12 +41,14 @@ dmd2:
   dfake_gen_update_ratio: 5
   use_gan_classifier: true
   use_backward_simulation: true
+  teacher_match_loss_weight: 0.1
 
 train:
   seed: 42
   precision: bf16
   micro_batch_size: 1
   grad_accumulation_steps: 1
+  num_workers: 0
   learning_rate_student: 1.0e-5
   learning_rate_fake_critic: 1.0e-5
   max_train_steps: 100
@@ -55,6 +57,9 @@ train:
   save_every: 50
   checkpoints_total_limit: 2
   min_free_space_gb: 50
+  gradient_checkpointing: true
+  fused_adamw: true
+  max_grad_norm: 1.0
 
 eval:
   enabled: true
@@ -75,4 +80,3 @@ eval:
     - label: dmd2_4nfe
       mode: dmd2
       steps: 4
-

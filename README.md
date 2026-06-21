@@ -7,7 +7,8 @@ Status on 2026-06-22:
 - Upstream DMD2 cloned at `/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2`.
 - Official DMD2 SDXL 4-step LoRA smoke is passing.
 - Smoke output is archived in `artifacts/official_sdxl_smoke/`.
-- FireRed migration is not trained yet; this repo defines the first migration design, preflight, and run phases.
+- FireRed local DMD2 LoRA dryrun is passing on a real A800 GPU.
+- Full FireRed training is not submitted yet; the current local mirror only covers the 20-record smoke subset.
 
 ## Official Smoke
 
@@ -72,6 +73,30 @@ Before a smoke/dryrun:
 python scripts/preflight_firered_dmd2.py --config configs/firered_gray_dmd2_lora_smoke.yaml
 ```
 
+Run the current local FireRed DMD2 dryrun on the A800 server:
+
+```bash
+ssh -i ~/.ssh/id_ed25519 -p 22 suntengjiao@175.178.95.29 \
+  'cd /vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_firered_porting_harness && \
+   export CUDA_VISIBLE_DEVICES=0 && \
+   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && \
+   PY=/vepfs-cnbja62d5d769987/suntengjiao/anaconda3/envs/twin_flow_qwen/bin/python && \
+   $PY scripts/train_firered_dmd2_local.py \
+     --config configs/firered_gray_dmd2_lora_smoke.yaml \
+     --steps 3 \
+     --device cuda \
+     --eval-samples 2 \
+     --fake-updates-per-step 1'
+```
+
+Latest passing local run:
+
+`/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/dmd2_firered_gray_lora_smoke/local_3step_20260622_072159`
+
+Detailed run notes:
+
+- `docs/local_dmd2_dryrun_20260622.md`
+
 Before full training:
 
 ```bash
@@ -81,10 +106,10 @@ python scripts/preflight_firered_dmd2.py --config configs/firered_gray_dmd2_lora
 ## Recommended Migration Phases
 
 1. Keep upstream DMD2 smoke reproducible.
-2. Add FireRed data/model preflight and one-sample teacher inference.
-3. Implement FireRed DMD2 adapter interfaces: model wrapper, scheduler/x0 conversion, dataset, real-data latents, classifier head.
-4. Run a single-batch no-save dryrun.
-5. Run a 100-step fastrun with contact-sheet eval.
+2. Add FireRed data/model preflight and one-sample teacher inference. Done.
+3. Implement FireRed DMD2 adapter interfaces: model wrapper, flow-to-x0 conversion, dataset, real-data latents, classifier head. Done for local dryrun.
+4. Run a single-batch no-save dryrun. Done.
+5. Run a 100-step fastrun with the full comparison contact sheet.
 6. Only after visual eval works, submit the real Slurm run.
 
 ## Key Design Decision

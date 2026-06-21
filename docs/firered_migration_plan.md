@@ -75,14 +75,20 @@ Required checks:
 - `cfg_scale` is exactly `0`.
 - output/checkpoint directory has enough free space.
 
+Current status:
+
+- 20-record local subset preflight passes.
+- 3-step single-GPU local DMD2 LoRA dryrun passes.
+- Passing run: `/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/dmd2_firered_gray_lora_smoke/local_3step_20260622_072159`
+
 Then run in this order:
 
 1. Teacher-only inference on 2 samples.
-2. Student/fake-critic model construction.
-3. One forward pass with `no_save`.
-4. One generator update and one guidance update.
+2. Student/fake-critic model construction. Done for local dryrun.
+3. One forward pass with `no_save`. Done through real training step.
+4. One generator update and one guidance update. Done.
 5. 20-step local fastrun.
-6. 100-step Slurm fastrun with contact sheet.
+6. 100-step local or Slurm fastrun with full comparison contact sheet.
 
 ## Evaluation Format
 
@@ -100,3 +106,4 @@ For the first DMD2 comparison, `dmd2_4nfe` is the primary target, because upstre
 - FireRed edit conditioning includes source-image latents; score matching and classifier loss must be conditioned on the same source/prompt pair.
 - Full-model DMD2 would likely exceed our current checkpoint/storage margin.
 - Upstream DMD2 saving is weak for resume under FSDP; our FireRed implementation must keep the stronger resume/offline-eval logic we added for TwinFlow.
+- The current local DMD2 dryrun saves LoRA adapters and a latent realism head, but it does not yet implement full optimizer/RNG resume.

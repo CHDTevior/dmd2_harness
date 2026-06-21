@@ -42,6 +42,20 @@ GLIBC_2.32 not found
 
 The official smoke was run successfully in `twin_flow_qwen`.
 
+## FireRed Local DMD2 Notes
+
+The first real A800 dryrun exposed two dtype boundaries that are now fixed in `scripts/train_firered_dmd2_local.py`:
+
+1. The fake-critic generated-sample branch produced fp32 noisy latents while the QwenImageEdit weights were bf16.
+2. The no-grad student generation branch needed bf16 autocast because Qwen attention uses an additive mask and SDPA requires the mask/bias dtype to match the query dtype.
+
+The passing run confirms:
+
+- local image and embedding loading works;
+- gray LoRA can be loaded into `teacher_gray`, `student`, and `fake_critic`;
+- student and fake-critic optimizers can step on one A800;
+- `loss_dm` becomes non-zero after fake-critic updates.
+
 ## FireRed Engineering Rules
 
 - No implicit fallback from local files to COS/HF during Slurm training.
@@ -49,4 +63,3 @@ The official smoke was run successfully in `twin_flow_qwen`.
 - No full run before one-batch dryrun and 100-step fastrun.
 - All downloads are separate commands with proxy variables unset.
 - All eval outputs should write a manifest and contact sheet.
-
