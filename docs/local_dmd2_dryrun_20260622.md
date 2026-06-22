@@ -67,4 +67,20 @@ ssh -i ~/.ssh/id_ed25519 -p 22 suntengjiao@175.178.95.29 \
 - This is a local smoke/dryrun, not the final DMD2 training recipe.
 - The local mirror currently only covers the 20-record subset, not full `clay.jsonl`.
 - Fake-critic update ratio was set to `1` for the smoke to reduce turnaround time; the config default remains `5`.
-- Current eval is a 1NFE adapter comparison contact sheet, not yet the full requested `orig_lora_vanilla_40 | orig_lora_few_1nfe | dmd2_1nfe | dmd2_2nfe | dmd2_4nfe | target` grid.
+- Full requested QA eval has been added as `scripts/eval_firered_dmd2_qa.py` and was smoke-tested on one sample.
+
+## QA Eval Format
+
+The QA contact sheet columns are:
+
+```text
+input | orig_lora_vanilla_40 | orig_lora_few_1nfe | dmd2_1nfe | dmd2_2nfe | dmd2_4nfe | target
+```
+
+Smoke-tested QA output:
+
+`/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/dmd2_firered_gray_lora_smoke/local_3step_20260622_072159/offline_eval_qa_test/global_step_000003/contact_sheet.png`
+
+The Slurm fastrun wrapper runs training first, then launches this QA eval as a separate Python process:
+
+`scripts/sbatch_firered_dmd2_lora_fastrun.sh`

@@ -97,6 +97,16 @@ Detailed run notes:
 
 - `docs/local_dmd2_dryrun_20260622.md`
 
+Run Slurm fastrun with the agreed QA sheet:
+
+```bash
+sbatch scripts/sbatch_firered_dmd2_lora_fastrun.sh
+```
+
+This Slurm fastrun trains on the current 20-record local subset and writes QA eval in:
+
+`<run_dir>/offline_eval_qa/global_step_000100/contact_sheet.png`
+
 Before full training:
 
 ```bash
@@ -109,7 +119,7 @@ python scripts/preflight_firered_dmd2.py --config configs/firered_gray_dmd2_lora
 2. Add FireRed data/model preflight and one-sample teacher inference. Done.
 3. Implement FireRed DMD2 adapter interfaces: model wrapper, flow-to-x0 conversion, dataset, real-data latents, classifier head. Done for local dryrun.
 4. Run a single-batch no-save dryrun. Done.
-5. Run a 100-step fastrun with the full comparison contact sheet.
+5. Run a 100-step fastrun with the full comparison contact sheet. Slurm script added.
 6. Only after visual eval works, submit the real Slurm run.
 
 ## Key Design Decision

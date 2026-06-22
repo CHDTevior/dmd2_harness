@@ -71,6 +71,9 @@ eval:
     - label: orig_lora_vanilla_40
       mode: teacher_vanilla
       steps: 40
+    - label: orig_lora_few_1nfe
+      mode: teacher_dmd2
+      steps: 1
     - label: dmd2_1nfe
       mode: dmd2
       steps: 1
