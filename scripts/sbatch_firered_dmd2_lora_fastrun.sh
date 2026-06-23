@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-#SBATCH -J dmd2_firered_lora_fast
+#SBATCH -J dmd2_firered_20k
 #SBATCH -p gpu-a800-traing-queue-02-single
 #SBATCH -N 1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=220G
-#SBATCH -t 2-00:00:00
+#SBATCH -t 5-00:00:00
 #SBATCH -o /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/logs/dmd2_firered_lora_fast_%j.out
 #SBATCH -e /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/logs/dmd2_firered_lora_fast_%j.err
 
@@ -17,7 +17,7 @@ CONDA_SH=/vepfs-cnbja62d5d769987/suntengjiao/anaconda3/etc/profile.d/conda.sh
 CONDA_ENV=/vepfs-cnbja62d5d769987/suntengjiao/anaconda3/envs/twin_flow_qwen
 
 CONFIG_PATH=${CONFIG_PATH:-configs/firered_gray_dmd2_lora_smoke.yaml}
-DMD2_STEPS=${DMD2_STEPS:-100}
+DMD2_STEPS=${DMD2_STEPS:-20000}
 QA_MAX_SAMPLES=${QA_MAX_SAMPLES:-4}
 QA_SEED=${QA_SEED:-42}
 RUN_ID=${RUN_ID:-slurm_fastrun_${SLURM_JOB_ID:-manual}}

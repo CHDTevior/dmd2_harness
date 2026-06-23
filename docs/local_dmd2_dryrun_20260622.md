@@ -84,3 +84,5 @@ Smoke-tested QA output:
 The Slurm fastrun wrapper runs training first, then launches this QA eval as a separate Python process:
 
 `scripts/sbatch_firered_dmd2_lora_fastrun.sh`
+
+Current Slurm defaults are `20000` training steps, checkpoint every `500` steps, and retention of the latest `5` checkpoints. Checkpoints include optimizer and RNG state for resume.

@@ -51,12 +51,13 @@ train:
   num_workers: 0
   learning_rate_student: 1.0e-5
   learning_rate_fake_critic: 1.0e-5
-  max_train_steps: 100
+  max_train_steps: 20000
   dryrun_steps: 1
   fastrun_steps: 100
-  save_every: 50
-  checkpoints_total_limit: 2
-  min_free_space_gb: 50
+  save_every: 500
+  checkpoints_total_limit: 5
+  min_free_space_gb: 120
+  save_optimizer_state: true
   gradient_checkpointing: true
   fused_adamw: true
   max_grad_norm: 1.0

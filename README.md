@@ -97,15 +97,23 @@ Detailed run notes:
 
 - `docs/local_dmd2_dryrun_20260622.md`
 
-Run Slurm fastrun with the agreed QA sheet:
+Run the current Slurm training job with the agreed QA sheet:
 
 ```bash
 sbatch scripts/sbatch_firered_dmd2_lora_fastrun.sh
 ```
 
-This Slurm fastrun trains on the current 20-record local subset and writes QA eval in:
+Current defaults:
 
-`<run_dir>/offline_eval_qa/global_step_000100/contact_sheet.png`
+- steps: `20000`
+- checkpoint save: every `500` steps
+- checkpoint retention: latest `5`
+- checkpoint content: student LoRA, fake-critic LoRA, latent realism head, optimizer states, RNG states
+- walltime: `5-00:00:00`
+
+This Slurm run trains on the current 20-record local subset and writes QA eval in:
+
+`<run_dir>/offline_eval_qa/global_step_020000/contact_sheet.png`
 
 Before full training:
 

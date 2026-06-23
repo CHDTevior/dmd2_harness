@@ -2,10 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 .cache/
+.cuda_link/
 outputs/
 checkpoints/
 wandb/
 *.log
 *.out
 *.err
-

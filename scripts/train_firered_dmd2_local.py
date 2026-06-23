@@ -5,6 +5,7 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
 import time
 from contextlib import contextmanager
@@ -74,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--eval-samples", type=int, default=None)
     parser.add_argument("--fake-updates-per-step", type=int, default=None)
+    parser.add_argument("--resume-checkpoint", default="", help="Path to a global_step_* checkpoint dir")
     return parser.parse_args()
 
 
@@ -359,12 +361,35 @@ def run_eval_contact_sheet(
         wrapped_model.train()
 
 
-def save_checkpoint(inner_peft, head: nn.Module, cfg: Dict, run_dir: Path, step: int) -> Path:
+def save_checkpoint(
+    inner_peft,
+    head: nn.Module,
+    cfg: Dict,
+    run_dir: Path,
+    step: int,
+    student_opt: torch.optim.Optimizer | None = None,
+    fake_opt: torch.optim.Optimizer | None = None,
+) -> Path:
     ckpt_dir = run_dir / "checkpoints" / f"global_step_{step:06d}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     inner_peft.save_pretrained(ckpt_dir / "student_adapter", selected_adapters=[STUDENT_ADAPTER])
     inner_peft.save_pretrained(ckpt_dir / "fake_critic_adapter", selected_adapters=[FAKE_ADAPTER])
     torch.save({"state_dict": head.state_dict(), "config": {"channels": head.net[0].in_features}}, ckpt_dir / "latent_realism_head.pt")
+    if bool(cfg["train"].get("save_optimizer_state", True)):
+        if student_opt is None or fake_opt is None:
+            raise ValueError("save_optimizer_state=true requires student_opt and fake_opt")
+        torch.save(
+            {
+                "step": int(step),
+                "student_optimizer": student_opt.state_dict(),
+                "fake_optimizer": fake_opt.state_dict(),
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                "numpy_rng_state": np.random.get_state(),
+                "python_random_state": random.getstate(),
+            },
+            ckpt_dir / "training_state.pt",
+        )
     (ckpt_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -383,6 +408,78 @@ def save_checkpoint(inner_peft, head: nn.Module, cfg: Dict, run_dir: Path, step:
     return ckpt_dir
 
 
+def load_training_state(
+    checkpoint_dir: Path,
+    inner_peft,
+    head: nn.Module,
+    student_opt: torch.optim.Optimizer,
+    fake_opt: torch.optim.Optimizer,
+    cfg: Dict,
+) -> int:
+    load_adapter_path = checkpoint_dir / "student_adapter" / STUDENT_ADAPTER
+    load_fake_path = checkpoint_dir / "fake_critic_adapter" / FAKE_ADAPTER
+    load_head_path = checkpoint_dir / "latent_realism_head.pt"
+    load_state_path = checkpoint_dir / "training_state.pt"
+    for path in (load_adapter_path, load_fake_path, load_head_path):
+        if not path.exists():
+            raise FileNotFoundError(f"Resume checkpoint is incomplete: {path}")
+    if bool(cfg["train"].get("save_optimizer_state", True)) and not load_state_path.is_file():
+        raise FileNotFoundError(f"Resume checkpoint missing optimizer/RNG state: {load_state_path}")
+
+    load_adapter_into(inner_peft, load_adapter_path, STUDENT_ADAPTER)
+    load_adapter_into(inner_peft, load_fake_path, FAKE_ADAPTER)
+    head_state = torch.load(load_head_path, map_location="cpu", weights_only=False)
+    head.load_state_dict(head_state["state_dict"])
+    if not load_state_path.is_file():
+        step = int(checkpoint_dir.name.rsplit("_", 1)[-1])
+        print(
+            json.dumps({"event": "resume_model_only", "checkpoint_dir": str(checkpoint_dir), "step": step}),
+            flush=True,
+        )
+        return step
+
+    state = torch.load(load_state_path, map_location="cpu", weights_only=False)
+    student_opt.load_state_dict(state["student_optimizer"])
+    fake_opt.load_state_dict(state["fake_optimizer"])
+    torch.set_rng_state(state["torch_rng_state"])
+    if torch.cuda.is_available() and state.get("cuda_rng_state_all"):
+        torch.cuda.set_rng_state_all(state["cuda_rng_state_all"])
+    np.random.set_state(state["numpy_rng_state"])
+    random.setstate(state["python_random_state"])
+    step = int(state["step"])
+    print(
+        json.dumps({"event": "resume_loaded", "checkpoint_dir": str(checkpoint_dir), "step": step}),
+        flush=True,
+    )
+    return step
+
+
+def prune_checkpoints(run_dir: Path, total_limit: int) -> None:
+    if total_limit <= 0:
+        return
+    checkpoint_root = run_dir / "checkpoints"
+    if not checkpoint_root.is_dir():
+        return
+
+    def step_number(path: Path) -> int:
+        try:
+            return int(path.name.rsplit("_", 1)[-1])
+        except ValueError:
+            return -1
+
+    checkpoints = [
+        path for path in checkpoint_root.glob("global_step_*") if path.is_dir() and step_number(path) >= 0
+    ]
+    checkpoints.sort(key=step_number)
+    stale = checkpoints[: max(0, len(checkpoints) - total_limit)]
+    for path in stale:
+        shutil.rmtree(path)
+        print(
+            json.dumps({"event": "checkpoint_pruned", "checkpoint_dir": str(path)}, ensure_ascii=True),
+            flush=True,
+        )
+
+
 def main() -> None:
     args = parse_args()
     cfg_path = as_path(args.config, "config", must_file=True)
@@ -399,9 +496,18 @@ def main() -> None:
     steps = resolve_steps(cfg, args.steps)
     output_root = Path(cfg["project"]["output_dir"]).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
-    run_id = args.run_id or time.strftime("local_%Y%m%d_%H%M%S")
-    run_dir = output_root / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    resume_checkpoint = Path(args.resume_checkpoint).expanduser() if args.resume_checkpoint else None
+    if resume_checkpoint is not None:
+        if not resume_checkpoint.is_dir():
+            raise FileNotFoundError(f"resume checkpoint missing: {resume_checkpoint}")
+        run_dir = resume_checkpoint.parents[1]
+        run_id = run_dir.name
+        if not (run_dir / "config.yaml").is_file():
+            raise FileNotFoundError(f"resume run config missing: {run_dir / 'config.yaml'}")
+    else:
+        run_id = args.run_id or time.strftime("local_%Y%m%d_%H%M%S")
+        run_dir = output_root / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     data_cfg = cfg["data"]
@@ -490,6 +596,12 @@ def main() -> None:
     del first_batch, first_target, first_latents
     torch.cuda.empty_cache()
 
+    start_step = 0
+    if resume_checkpoint is not None:
+        start_step = load_training_state(resume_checkpoint, inner_peft, head, student_opt, fake_opt, cfg)
+        if start_step >= steps:
+            raise ValueError(f"resume step {start_step} is already >= requested steps {steps}")
+
     log_path = run_dir / "train_log.jsonl"
     data_iter = iter(loader)
     fake_updates = args.fake_updates_per_step
@@ -503,8 +615,11 @@ def main() -> None:
     gen_cls_weight = float(cfg["dmd2"].get("gen_cls_loss_weight", 0.0))
     guidance_cls_weight = float(cfg["dmd2"].get("guidance_cls_loss_weight", 0.0))
     use_classifier = bool(cfg["dmd2"].get("use_gan_classifier", True))
+    save_every = int(cfg["train"].get("save_every", 0) or 0)
+    checkpoints_total_limit = int(cfg["train"].get("checkpoints_total_limit", 0) or 0)
+    last_saved_step = 0
 
-    for step in range(1, steps + 1):
+    for step in range(start_step + 1, steps + 1):
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -617,6 +732,17 @@ def main() -> None:
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=True) + "\n")
         print(json.dumps({"event": "train_step", **record}, ensure_ascii=True), flush=True)
+        if save_every > 0 and step % save_every == 0:
+            ckpt_dir = save_checkpoint(inner_peft, head, cfg, run_dir, step, student_opt, fake_opt)
+            prune_checkpoints(run_dir, checkpoints_total_limit)
+            last_saved_step = step
+            print(
+                json.dumps(
+                    {"event": "checkpoint_saved", "step": step, "checkpoint_dir": str(ckpt_dir)},
+                    ensure_ascii=True,
+                ),
+                flush=True,
+            )
 
     eval_samples = args.eval_samples if args.eval_samples is not None else int(cfg["eval"].get("max_samples", 4))
     eval_loader = DataLoader(
@@ -629,7 +755,18 @@ def main() -> None:
     )
     eval_path = run_dir / "eval" / f"global_step_{steps:06d}" / "contact_sheet.png"
     run_eval_contact_sheet(wrapped_model, inner_peft, eval_loader, device, dtype, eval_path, max_samples=eval_samples)
-    ckpt_dir = save_checkpoint(inner_peft, head, cfg, run_dir, steps)
+    if last_saved_step == steps:
+        ckpt_dir = run_dir / "checkpoints" / f"global_step_{steps:06d}"
+    else:
+        ckpt_dir = save_checkpoint(inner_peft, head, cfg, run_dir, steps, student_opt, fake_opt)
+        prune_checkpoints(run_dir, checkpoints_total_limit)
+        print(
+            json.dumps(
+                {"event": "checkpoint_saved", "step": steps, "checkpoint_dir": str(ckpt_dir)},
+                ensure_ascii=True,
+            ),
+            flush=True,
+        )
     manifest = {
         "run_dir": str(run_dir),
         "checkpoint_dir": str(ckpt_dir),

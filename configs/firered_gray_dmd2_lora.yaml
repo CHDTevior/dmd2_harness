@@ -54,8 +54,9 @@ train:
   max_train_steps: 20000
   dryrun_steps: 1
   fastrun_steps: 100
-  save_every: 200
+  save_every: 500
   checkpoints_total_limit: 5
+  save_optimizer_state: true
   min_free_space_gb: 250
   gradient_checkpointing: true
   fused_adamw: true
