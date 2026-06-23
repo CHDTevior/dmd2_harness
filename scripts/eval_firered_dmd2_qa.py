@@ -51,8 +51,8 @@ QA_LABELS = [
     "orig_lora_vanilla_40",
     "orig_lora_few_1nfe",
     "dmd2_1nfe",
-    "dmd2_2nfe",
-    "dmd2_4nfe",
+    "dmd2_few_2nfe",
+    "dmd2_few_4nfe",
     "target",
 ]
 
@@ -388,10 +388,10 @@ def main() -> None:
         outputs["dmd2_1nfe"] = flow_sample_pixels(
             wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 1, prompt_embeds, prompt_mask, source_latents, dtype
         )
-        outputs["dmd2_2nfe"] = flow_sample_pixels(
+        outputs["dmd2_few_2nfe"] = flow_sample_pixels(
             wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 2, prompt_embeds, prompt_mask, source_latents, dtype
         )
-        outputs["dmd2_4nfe"] = flow_sample_pixels(
+        outputs["dmd2_few_4nfe"] = flow_sample_pixels(
             wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 4, prompt_embeds, prompt_mask, source_latents, dtype
         )
 

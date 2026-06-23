@@ -78,9 +78,9 @@ eval:
     - label: dmd2_1nfe
       mode: dmd2
       steps: 1
-    - label: dmd2_2nfe
-      mode: dmd2
+    - label: dmd2_few_2nfe
+      mode: dmd2_few
       steps: 2
-    - label: dmd2_4nfe
-      mode: dmd2
+    - label: dmd2_few_4nfe
+      mode: dmd2_few
       steps: 4

@@ -74,7 +74,7 @@ ssh -i ~/.ssh/id_ed25519 -p 22 suntengjiao@175.178.95.29 \
 The QA contact sheet columns are:
 
 ```text
-input | orig_lora_vanilla_40 | orig_lora_few_1nfe | dmd2_1nfe | dmd2_2nfe | dmd2_4nfe | target
+input | orig_lora_vanilla_40 | orig_lora_few_1nfe | dmd2_1nfe | dmd2_few_2nfe | dmd2_few_4nfe | target
 ```
 
 Smoke-tested QA output:

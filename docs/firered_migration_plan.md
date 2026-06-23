@@ -95,10 +95,10 @@ Then run in this order:
 Keep the same contact sheet format used for TwinFlow:
 
 ```text
-input | orig_lora_vanilla_40 | orig_lora_few_1nfe | dmd2_1nfe | dmd2_2nfe | dmd2_4nfe | target
+input | orig_lora_vanilla_40 | orig_lora_few_1nfe | dmd2_1nfe | dmd2_few_2nfe | dmd2_few_4nfe | target
 ```
 
-For the first DMD2 comparison, `dmd2_4nfe` is the primary target, because upstream DMD2 4-step is the most stable path.
+For the first DMD2 comparison, `dmd2_few_4nfe` is the primary target, because upstream DMD2 4-step is the most stable path.
 
 ## Known Risks
 
