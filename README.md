@@ -1,14 +1,17 @@
 # DMD2 FireRed Porting Harness
 
-This repo is a local migration harness for comparing DMD2 against our TwinFlow FireRed gray/clay experiments.
+This repo is a lightweight migration harness for comparing DMD2 against our TwinFlow FireRed gray/clay experiments and for reusing the same porting pattern on future models.
 
-Status on 2026-06-22:
+Status:
 
 - Upstream DMD2 cloned at `/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2`.
 - Official DMD2 SDXL 4-step LoRA smoke is passing.
 - Smoke output is archived in `artifacts/official_sdxl_smoke/`.
 - FireRed local DMD2 LoRA dryrun is passing on a real A800 GPU.
-- Full FireRed training is not submitted yet; the current local mirror only covers the 20-record smoke subset.
+- FireRed DMD2 LoRA and full-model implementations are present.
+- Full-model FireRed DMD2 uses FSDP, bf16, 4-NFE student training, CFG-4 teacher target, and CFG-0 distilled eval.
+- Two-node 1024 full-model smoke passed on 16 A800 GPUs with job `8382`.
+- The current repository intentionally excludes weights, full datasets, checkpoints, and generated evaluation directories.
 
 ## Official Smoke
 
@@ -55,6 +58,7 @@ Detailed notes:
 - `docs/dmd2_method_notes.md`
 - `docs/firered_migration_plan.md`
 - `docs/code_audit.md`
+- `docs/model_porting_runbook.md`
 
 ## FireRed Migration Target
 
@@ -121,6 +125,25 @@ Before full training:
 python scripts/preflight_firered_dmd2.py --config configs/firered_gray_dmd2_lora.yaml
 ```
 
+Full-model FSDP smoke:
+
+```bash
+sbatch -N 2 \
+  --ntasks=2 \
+  --ntasks-per-node=1 \
+  --gres=gpu:8 \
+  -p gpu-a800-traing-queue-02-single \
+  scripts/sbatch_firered_dmd2_full_fsdp.sh \
+  configs/firered_gray_dmd2_full_cfg4_4nfe_1024_1step_smoke.yaml
+```
+
+Full-model long-run template:
+
+```bash
+sbatch scripts/sbatch_firered_dmd2_full_fsdp.sh \
+  configs/firered_gray_dmd2_full_cfg4_4nfe_1024_3k.yaml
+```
+
 ## Recommended Migration Phases
 
 1. Keep upstream DMD2 smoke reproducible.
@@ -129,6 +152,15 @@ python scripts/preflight_firered_dmd2.py --config configs/firered_gray_dmd2_lora
 4. Run a single-batch no-save dryrun. Done.
 5. Run a 100-step fastrun with the full comparison contact sheet. Slurm script added.
 6. Only after visual eval works, submit the real Slurm run.
+
+## Repository Contents
+
+Keep this repo small:
+
+- keep: scripts, config templates, preflight checks, small JSONL smoke subsets, smoke contact sheets, manifests, migration docs;
+- exclude: model weights, LoRA weights, full datasets, optimizer checkpoints, W&B runs, generated eval folders.
+
+The reusable porting checklist is in `docs/model_porting_runbook.md`.
 
 ## Key Design Decision
 

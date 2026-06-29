@@ -64,8 +64,8 @@ train:
 
 eval:
   enabled: true
-  start_step: 100
-  every_steps: 100
+  start_step: 500
+  every_steps: 500
   max_samples: 4
   cfg_scale: 0
   variants:

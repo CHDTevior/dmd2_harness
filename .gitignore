@@ -9,3 +9,15 @@ wandb/
 *.log
 *.out
 *.err
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.npz
+*.npy
+events.out.tfevents*
+offline_eval/
+offline_eval_qa/
+tmp/

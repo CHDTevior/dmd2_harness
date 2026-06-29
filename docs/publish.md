@@ -2,7 +2,7 @@
 
 Chosen repository name:
 
-`CHDTevior/dmd2-firered-porting-harness`
+`CHDTevior/dmd2_harness`
 
 Chosen visibility:
 
@@ -14,36 +14,45 @@ Reason: this harness contains internal absolute paths, Slurm assumptions, and lo
 
 This directory is already a local git repository with a clean initial commit.
 
-If the GitHub repository already exists, push with:
+The GitHub repository exists at:
+
+`git@github.com:CHDTevior/dmd2_harness.git`
+
+Push with:
 
 ```bash
-git remote add origin git@github.com:CHDTevior/dmd2-firered-porting-harness.git
+git remote set-url origin git@github.com:CHDTevior/dmd2_harness.git
 git push -u origin master
 ```
-
-If the remote has already been configured:
-
-```bash
-git push -u origin master
-```
-
-## If GitHub Repo Does Not Exist
-
-Create a private empty repo named `dmd2-firered-porting-harness` under `CHDTevior`, then push from this directory.
-
-The current machine has SSH authentication to GitHub as `CHDTevior`, but it does not have `gh` installed and no `GITHUB_TOKEN`/`GH_TOKEN` is available. Therefore repo creation could not be performed from this shell without an additional GitHub creation interface.
 
 ## Bundle Export
 
 A portable bundle can be created with:
 
 ```bash
-git bundle create /vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2-firered-porting-harness.bundle --all
+git bundle create /vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_harness.bundle --all
 ```
 
 Import elsewhere with:
 
 ```bash
-git clone dmd2-firered-porting-harness.bundle dmd2-firered-porting-harness
+git clone dmd2_harness.bundle dmd2_harness
 ```
 
+## GitHub Target
+
+GitHub target name:
+
+`CHDTevior/dmd2_harness`
+
+The repository is intended to stay private/internal because configs and docs include cluster paths, Slurm queue names, and FireRed/TwinFlow integration assumptions.
+
+Before pushing:
+
+```bash
+find . -type f \( -size +25M -o -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' -o -name '*.bin' \) -print
+python -m py_compile scripts/*.py src/dmd2_firered/*.py
+git status --short
+```
+
+Expected large-file scan output is empty.

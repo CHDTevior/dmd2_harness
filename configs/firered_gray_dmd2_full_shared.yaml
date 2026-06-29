@@ -1,0 +1,87 @@
+model:
+  model_name: QwenImageEdit
+  aux_time_embed: false
+  model_path: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/ckpts_gray_lora_merged_v1
+  drop_text_encoder: true
+
+data:
+  firered_project_root: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth
+  condition_mode: offline
+  height: 512
+  width: 512
+  train_jsonl:
+    - /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/clay_meta/clay/clay.jsonl
+  max_samples:
+  repeat: 4
+  instruction_field: instruction
+  embedding_field: embeddings_tensor_en
+  uncond_embedding_field: embeddings_tensor_droptext
+
+method:
+  method_type: DMD2FullShared
+  critic_mode: shared_full
+  fm_loss_weight: 1.0
+  dm_loss_weight: 0.5
+  fake_loss_weight: 0.0
+  dm_grad_clip: 10.0
+  dm_grad_eps: 1.0e-6
+
+sample:
+  seed: 42
+  cfg_scale: 0
+  sampling_steps: 4
+  sampling_style: few
+
+eval:
+  enabled: true
+  eval_jsonl:
+    - /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/clay_meta/clay/clay.jsonl
+  max_samples: 4
+  batch_size: 1
+  num_workers: 0
+  start_step: 500
+  every_steps: 500
+  cfg_scale: 0
+  seed: 42
+  sampling_steps: 4
+  sampling_style: few
+  reference_manifest: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/twinflow_firered_gray_lora_v1/qwenimage_task/qwenimage_lora_firered_gray_twinflow.local/offline_eval_student_few_nfe_2600_with_orig_20260623/global_step_2600/manifest.json
+  reference_labels:
+    - orig_lora_vanilla_40
+    - orig_lora_few_1nfe
+  variants:
+    - label: dmd2_full_1nfe
+      sampling_style: few
+      sampling_steps: 1
+    - label: dmd2_full_few_2nfe
+      sampling_style: few
+      sampling_steps: 2
+    - label: dmd2_full_few_4nfe
+      sampling_style: few
+      sampling_steps: 4
+
+train:
+  load_checkpoint_path: ""
+  resume_require_optimizer: true
+  resume_require_train_state: true
+  resume_require_rng_state: true
+  resume_strict_world_size: true
+  output_dir: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/dmd2_firered_gray_full_shared_v1
+  seed: 42
+  grad_accumulation_steps: 1
+  micro_batch_size: 1
+  max_train_steps: 20000
+  num_train_epochs: 4
+  num_workers: 4
+  lr: 1.0e-6
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  save_every: 500
+  save_final_checkpoint: true
+  checkpoints_total_limit: 1
+  checkpoint_expected_size_gb: 280
+  checkpoint_preclean_before_save: true
+  precision_mode: bf16
+  fsdp_backend: fsdp1
+  fsdp_use_orig_params: false

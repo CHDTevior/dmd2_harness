@@ -1,0 +1,92 @@
+model:
+  model_name: QwenImageEdit
+  aux_time_embed: false
+  model_path: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/ckpts_gray_lora_merged_v1
+  drop_text_encoder: true
+
+data:
+  firered_project_root: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth
+  condition_mode: offline
+  height: 1024
+  width: 1024
+  train_jsonl:
+    - /vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_firered_porting_harness/artifacts/local_subset/clay_local_subset.jsonl
+  max_samples: 8
+  repeat: 1
+  instruction_field: instruction
+  embedding_field: embeddings_tensor_en
+  uncond_embedding_field: embeddings_tensor_droptext
+
+method:
+  method_type: DMD2FullShared
+  critic_mode: shared_full
+  fm_loss_weight: 1.0
+  dm_loss_weight: 0.5
+  fake_loss_weight: 0.0
+  cfg_bake_loss_weight: 0.1
+  train_cfg_scale: 4.0
+  train_cfg_mode: teacher_detached
+  student_train_sampling_steps: 4
+  student_train_backprop_mode: single_step
+  sequential_backward: true
+  debug_timing: false
+  dm_grad_clip: 10.0
+  dm_grad_eps: 1.0e-6
+
+sample:
+  seed: 42
+  cfg_scale: 0
+  sampling_steps: 4
+  sampling_style: few
+
+eval:
+  enabled: false
+  eval_jsonl:
+    - /vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_firered_porting_harness/artifacts/local_subset/clay_local_subset.jsonl
+  max_samples: 4
+  batch_size: 1
+  num_workers: 0
+  start_step: 500
+  every_steps: 500
+  cfg_scale: 0
+  seed: 42
+  sampling_steps: 4
+  sampling_style: few
+  reference_manifest: /vepfs-cnbja62d5d769987/suntengjiao/distill/reports/firered_gray_twinflow_review_20260622/artifacts/orig_lora_vanilla_source_cfg4_20260625/source_cfg4_reference_manifest.json
+  reference_labels:
+    - orig_lora_source_40_cfg4
+  variants:
+    - label: dmd2_full_cfgtrain_few_4nfe_1024_smoke
+      sampling_style: few
+      sampling_steps: 4
+
+train:
+  load_checkpoint_path: ""
+  resume_require_optimizer: true
+  resume_require_train_state: true
+  resume_require_rng_state: true
+  resume_strict_world_size: true
+  output_dir: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/dmd2_firered_gray_full_cfg4_4nfe_1024_smoke
+  seed: 42
+  grad_accumulation_steps: 1
+  micro_batch_size: 1
+  max_train_steps: 1
+  num_train_epochs: 1
+  num_workers: 0
+  lr: 5.0e-7
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  save_every: 500
+  save_final_checkpoint: false
+  checkpoints_total_limit: 1
+  checkpoint_expected_size_gb: 0
+  checkpoint_preclean_before_save: true
+  precision_mode: bf16
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  fsdp_backend: fsdp1
+  fsdp_use_orig_params: false
+  fsdp_limit_all_gathers: true
+  fsdp_backward_prefetch: false
+  fsdp_forward_prefetch: false
