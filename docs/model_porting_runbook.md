@@ -1,200 +1,178 @@
 # Model Porting Runbook
 
-This document is the reusable checklist for taking a new image generation or image editing model from "not supported" to "DMD2 trainable" in this harness.
+This is the reusable checklist for taking a new conditional image generation or
+image editing model from "not supported" to a reproducible DMD2 experiment.
+Keep this repository small: commit code, config templates, tiny smoke inputs,
+manifests, and documentation. Do not commit weights, full datasets,
+checkpoints, W&B runs, or generated evaluation directories.
 
-The repository should stay lightweight. Commit code, configs, tiny smoke inputs, manifests, and contact-sheet examples. Do not commit model weights, optimizer checkpoints, full datasets, W&B runs, or generated evaluation directories.
+## 1. Define The Contract Before Code
 
-## 1. Define The Distillation Target
-
-Before writing training code, make the target explicit:
+Write the following decisions in the config before implementing the adapter.
 
 | Decision | Required answer |
 | --- | --- |
-| Student form | LoRA adapter or full-model checkpoint |
-| Teacher | frozen base, frozen LoRA, or merged full teacher |
-| Inference NFE | usually `few 1`, `few 2`, or `few 4` |
-| Training NFE | the student rollout used inside DMD2, not just eval |
-| CFG policy | whether CFG is used in teacher/training and whether eval uses CFG |
-| Resolution | training resolution and evaluation resolution |
-| Resume policy | whether optimizer, train state, RNG, and world size must match |
-| Checkpoint retention | how many checkpoints are kept on shared storage |
+| Student form | LoRA or full model; which parameters are trainable? |
+| Teacher capability | frozen base, frozen adapter, or merged teacher? |
+| Real/fake topology | separate fake critic or an explicitly justified alternative? |
+| Student training NFE | rollout NFE used by the DMD2 loss |
+| Student eval NFE | exact sampler plus tested NFE values |
+| CFG contract | real teacher scale, fake critic scale, student scale |
+| Resolution | train and eval resolution |
+| GAN feature | model layer, feature shape, and all conditioning inputs |
+| Checkpoint mode | inference-only or exact continuation |
+| Slurm topology | GPUs per node, node count, and expected free storage |
 
-For the FireRed gray full-model experiment:
+For the FireRed gray target, the canonical choices are full student, separate
+full fake critic, merged gray teacher, `dmd2_renoise`, `real CFG=4`, `fake
+CFG=1`, `student CFG=0`, bf16 FSDP, and 1024 evaluation every 250 steps.
 
-- student form: full FSDP transformer checkpoint;
-- teacher capability: original gray LoRA merged into the FireRed backbone before DMD2;
-- training NFE: `4`;
-- training CFG: `4.0` through detached teacher target / CFG bake loss;
-- evaluation CFG: `0`;
-- evaluation variants: `few 1`, `few 2`, `few 4`;
-- save/eval cadence: every `500` iterations;
-- checkpoint retention: latest `1` for full-model runs.
+## 2. Make The Config The Source Of Truth
 
-## 2. Add A Config First
+Keep the following groups explicit:
 
-The config is the source of truth. Avoid hidden constants in the training script.
+- `model`: model family, merged teacher path, text-encoder behavior, dtype.
+- `data`: JSONL, image fields, cond/uncond embeddings, resolution.
+- `method`: DMD2 topology, losses, NFE, CFG, GAN feature layer, update ratio.
+- `sample` and `eval`: sampler, student CFG, NFE, reference manifest.
+- `train`: optimizer, FSDP, checkpoint mode, retention, and output path.
 
-Minimum config groups:
+Use fail-fast validation. A distributed job must reject a legacy sampler,
+missing unconditional embedding, unsupported checkpoint policy, or wrong NFE
+before allocating hours of GPUs.
 
-- `model`: model family, model path, text encoder behavior, dtype assumptions.
-- `data`: JSONL files, image fields, conditional/unconditional embedding fields, resolution.
-- `method`: DMD2 losses, student rollout NFE, CFG training policy, fake critic policy.
-- `sample`: default inference settings.
-- `eval`: contact-sheet variants, reference manifest, cadence, sample count.
-- `train`: optimizer, precision, FSDP settings, save/resume settings, output path.
+## 3. Build A Condition-Complete Dataset Adapter
 
-Fail fast if a required field is missing. A long Slurm job should not discover a bad JSONL key after GPUs are allocated.
-
-## 3. Build The Dataset Adapter
-
-DMD2 needs condition-aligned real and generated samples. For image editing models this means each batch must contain:
+For an image-editing model each batch needs all of the following, aligned to
+the same record identity:
 
 - source image or source latent;
 - target image or target latent;
 - conditional prompt representation;
-- unconditional prompt representation if CFG is trained or evaluated;
-- record identity for evaluation manifests.
+- unconditional prompt representation when the real teacher uses CFG;
+- an identifier used by the fixed evaluation manifest.
 
-For FireRed, the adapter uses `FireRedEditJsonlDataset` from TwinFlow and reads:
+Never replace missing images, embeddings, or remote paths with a blank value.
+Raise a row-specific error in preflight. For FireRed this is the source image,
+target image, `embeddings_tensor_en`, and `embeddings_tensor_droptext`.
 
-- `source_image`;
-- `edit_image`;
-- `embeddings_tensor_en`;
-- `embeddings_tensor_droptext`.
+## 4. Implement The Model Wrapper From Native Semantics
 
-Do not silently replace missing images or embeddings. Raise an explicit error with the row number and missing field.
-
-## 4. Wrap The Model
-
-The DMD2 method only needs a small model API:
+The adapter must define an unambiguous call such as:
 
 ```python
 velocity = model_fn(x_t, t, [prompt_embeds, prompt_mask, source_latents])
 ```
 
-Porting a new model means writing the wrapper that maps this call into the model's native forward pass.
-
-For non-epsilon diffusion models, do not reuse SDXL formulas blindly. FireRed/QwenImageEdit is a flow/velocity model, so the predicted clean latent is:
+Do not copy an epsilon-diffusion formula into a flow model. For the FireRed
+velocity parameterization the predicted clean latent is:
 
 ```text
 x0 = x_t - t * velocity
 ```
 
-If the model has image-edit conditioning, the source condition must be present in every teacher, student, fake-critic, and eval call. A score comparison with mismatched conditions is invalid.
+Pass the same source and prompt condition to student, real teacher, fake
+critic, GAN classifier, and evaluation. Otherwise the score comparison is not
+defined on the same conditional distribution.
 
-## 5. Choose The DMD2 Topology
+## 5. Use The Official DMD2 Topology
 
-There are two supported experiment shapes:
+The current FireRed path is `DMD2FullOfficial`:
 
-| Topology | Use case | Storage/memory profile |
-| --- | --- | --- |
-| LoRA student + LoRA fake critic | first port, cheap ablations, capability-specific distillation | light checkpoints, easier iteration |
-| Full student with shared/full fake path | final capability comparison, no adapter constraint | expensive FSDP checkpoints, needs strict retention |
+- trainable student/generator;
+- frozen real teacher queried at `real_guidance_scale > 1`;
+- trainable separate fake critic queried at `fake_guidance_scale: 1`;
+- optional Qwen hidden-state GAN classifier on the fake critic.
 
-The full FireRed experiment uses `DMD2FullShared`. It is LoRA-free and saves a full FSDP transformer checkpoint. Three independent full Qwen transformers are not practical on the shared storage/GPU setup, so the implementation keeps the fake-score path shared and controlled by the DMD2 loss design.
+The distribution-matching loss is not a generic flow-matching loss and it is
+not equivalent to reducing the inference step count. The student rollout uses
+`method.student_train_sampling_steps`; the real and fake score terms are then
+evaluated on noisy student samples.
 
-## 6. Implement Training Losses
+For the Qwen GAN port, attach the classifier to a middle fake-critic block.
+The head must consume edit tokens, source tokens, pooled prompt condition, and
+timestep. A latent-only head discards the model's conditioning path and is not
+equivalent to upstream's bottleneck classifier.
 
-The FireRed full-model implementation keeps four explicit loss terms:
+## 6. Separate Source Baseline From Distilled Evaluation
 
-- `fm`: flow matching on real target latents;
-- `dm`: DMD2 distribution matching surrogate;
-- `fake`: optional fake-score denoising loss;
-- `cfg_bake`: optional loss that bakes a CFG teacher target into the conditional student.
+The original source pipeline and the DMD2 student have different samplers.
 
-The DMD2 update is not just "run fewer inference steps." The training step must sample the student according to `method.student_train_sampling_steps`, then compute the score/target correction used by the DMD2 surrogate.
+| Column | Correct protocol |
+| --- | --- |
+| Source baseline | FireRed source `FlowMatchEulerDiscreteScheduler`, 40 NFE, CFG 4.0 |
+| DMD2 student | `dmd2_renoise`, configured NFE, CFG 0 |
+| DMD2 teacher | guided score query during training, not a student inference column |
 
-Current full-model config uses:
+Do not label a source-scheduler 4-step output as a DMD2 4-NFE result. Keep
+the source baseline as a separate manifest-driven reference column.
 
-```yaml
-method:
-  student_train_sampling_steps: 4
-  student_train_backprop_mode: single_step
-  train_cfg_scale: 4.0
-  train_cfg_mode: teacher_detached
-  cfg_bake_loss_weight: 0.1
-sample:
-  cfg_scale: 0
-eval:
-  cfg_scale: 0
-```
+Use the same fixed four records, source images, prompts, seed, and 1024
+resolution at every checkpoint. Keep machine-readable manifests. In a human
+report, render independent images side by side for one conclusion per row; do
+not use a relabeled concatenated contact sheet as evidence.
 
-## 7. Add Preflight Before Slurm
+## 7. Preflight Before Slurm
 
-A good preflight checks:
+The preflight must validate:
 
-- model directory and key model files exist;
-- train/eval JSONL exists and has required keys;
-- at least one source image and embedding can be loaded;
-- config has the agreed `save_every` and `eval.every_steps`;
-- checkpoint retention is bounded;
-- free disk space is sufficient;
-- COS/local data access is explicit.
+- model directory and transformer files;
+- train/eval JSONL and all required fields;
+- representative source image and embeddings;
+- local/COS access mode;
+- sampler and CFG contract;
+- eval/save cadence and checkpoint retention;
+- expected disk space at the output path.
 
-The full FSDP sbatch script performs a second preflight after Slurm allocation because it also needs node-local environment and COS credentials.
+Run it again inside the Slurm allocation because node-local paths,
+environment, and COS credentials can differ from the submit host.
 
-## 8. Add Evaluation Before Long Training
+## 8. FSDP And Slurm
 
-Every port must produce the same style of contact sheet before long training:
-
-```text
-input | orig_lora_source_40_cfg4 | dmd2_full_1nfe | dmd2_full_few_2nfe | dmd2_full_few_4nfe | target
-```
-
-For FireRed gray, evaluation uses `CFG=0` for the distilled model. The original non-distilled reference can be generated separately with its source script and `CFG=4.0`, then passed in through `eval.reference_manifest`.
-
-Keep contact-sheet images and JSON manifests. Do not keep all intermediate generated images unless they are needed for debugging.
-
-## 9. Slurm / FSDP Notes
-
-For 1024 full-model FireRed DMD2, the clean smoke path is:
+For FireRed 1024 full DMD2 use two nodes of eight GPUs and bf16 FSDP.
 
 ```bash
-sbatch -N 2 \
-  --ntasks=2 \
-  --ntasks-per-node=1 \
-  --gres=gpu:8 \
-  -p gpu-a800-traing-queue-02-single \
-  scripts/sbatch_firered_dmd2_full_fsdp.sh \
-  configs/firered_gray_dmd2_full_cfg4_4nfe_1024_1step_smoke.yaml
+sbatch --nodes=2 --ntasks=2 --ntasks-per-node=1 --gres=gpu:8 \
+  --partition=<site-gpu-partition> \
+  scripts/sbatch_firered_dmd2_full_fsdp.sh <config.yaml>
 ```
 
-Important FSDP choices:
+Passing only `--nodes=2` is incorrect when the script declares one task: Slurm
+can collapse the allocation to one node. The launcher must resolve IPv4 for
+the master and each local rank. Hostname IPv6 warnings are secondary; the
+success condition is two `[LaunchNode]` entries with routable IPv4 addresses.
 
-- use bf16 mixed precision;
-- use `gradient_checkpointing_use_reentrant: false`;
-- bind `torchrun --local_addr` to the node IPv4 address;
-- bind `dist.barrier(device_ids=[local_rank])`;
-- keep `TORCH_DISTRIBUTED_DEBUG=DETAIL` out of production runs;
-- keep `FIRERED_DISABLE_FLASH_ATTN=1` on this environment because the installed wheel requires a newer glibc.
+Use `gradient_checkpointing_use_reentrant: false`. Reentrant activation
+checkpointing can replay a forward segment in an order that conflicts with
+FSDP's expected module execution order. The symptom is a forward-order or
+collective hang, not a useful training slowdown.
 
-The 2-node 1024 smoke passed with job `8382`, 16 A800 GPUs, and a single DMD2 training step. It completed without FSDP forward-order warnings, OOM, or fatal NCCL errors. One step took about `268s`, so 1024 training is feasible but expensive.
+## 9. Choose Checkpoints Deliberately
 
-## 10. Debugging Rules
+`model_only_eval` saves only student model shards and metadata. It is suitable
+for periodic visual evaluation with one retained checkpoint, but cannot resume
+DMD2 because the fake critic, GAN classifier, optimizers, cursor, and RNG are
+missing.
 
-When a distributed run is slow or stuck, isolate one axis at a time:
+`full_training_state` saves all of those components and enforces same-world
+size loading and an identical resolved-config fingerprint. It needs storage for the completed old state and the new state
+being written. Do not delete the only completed state before a replacement has
+the completion marker. This is a correctness rule, not just a retention
+preference.
 
-1. config and data preflight;
-2. one-node 512 smoke;
-3. one-node 1024 smoke if relevant;
-4. two-node 1024 one-step smoke;
-5. only then submit a longer run.
+Use a dedicated, deterministic DataLoader generator. Creating a new iterator
+after restoring process RNG otherwise consumes Torch's global RNG to seed data
+workers and breaks bitwise continuation before the next training step.
 
-Known FireRed-specific findings:
+## 10. Required Gates
 
-- c10d `Address family not supported by protocol` hostname warnings were noisy but not the root cause;
-- `FSDP Forward order differs` was the dangerous warning;
-- the fix was non-reentrant checkpointing plus cleaner production distributed flags;
-- full `[B,1,S,S]` attention masks at 1024 are expensive, so the Qwen wrapper should skip mask construction when the mask is all ones.
+1. Upstream DMD2 smoke passes.
+2. Data/model/config preflight passes.
+3. One-step local runtime smoke passes.
+4. Two-node 1024 smoke shows finite student/fake/GAN losses.
+5. First scheduled 250-step eval produces the fixed reference comparison.
+6. Only then start a long run or sweep.
 
-## 11. Publish Checklist
-
-Before pushing the harness:
-
-```bash
-git status --short
-find . -type f \( -size +25M -o -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' -o -name '*.bin' \) -print
-python -m py_compile scripts/*.py src/dmd2_firered/*.py
-```
-
-The expected large-file scan result is empty. If it is not empty, do not push until those files are removed or ignored.
+For a `dfake_gen_update_ratio` of 5, four fake-critic updates followed by one
+student update are expected. Zero student gradient on critic-only iterations
+is normal; a nonfinite value or an unexpected generator cadence is not.

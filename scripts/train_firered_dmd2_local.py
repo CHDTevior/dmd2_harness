@@ -38,7 +38,9 @@ from torchvision.transforms import functional as TF
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
-TWINFLOW_SRC = Path("/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src")
+TWINFLOW_SRC = Path(
+    os.environ.get("TWINFLOW_SRC", "/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src")
+).expanduser()
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 if str(TWINFLOW_SRC) not in sys.path:

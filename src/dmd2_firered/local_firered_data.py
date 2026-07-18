@@ -1,4 +1,6 @@
 import json
+import os
+import importlib.util
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -44,6 +46,18 @@ def resolve_local_path(raw_path: str, local_data_root: Path) -> Path:
     return resolved
 
 
+def _load_firered_image_utils(project_root: Path):
+    utils_path = project_root / "train" / "src" / "utils" / "image_utils.py"
+    if not utils_path.is_file():
+        raise FileNotFoundError(f"FireRed image_utils.py not found: {utils_path}")
+    spec = importlib.util.spec_from_file_location("_firered_image_utils_local_dmd2", str(utils_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not import FireRed image utils from {utils_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _resize_center_crop(image: Image.Image, height: int, width: int) -> torch.Tensor:
     image = image.convert("RGB")
     scale = max(height / image.height, width / image.width)
@@ -55,17 +69,20 @@ def _resize_center_crop(image: Image.Image, height: int, width: int) -> torch.Te
     return TF.normalize(tensor, [0.5], [0.5])
 
 
-def _load_embedding(path: Path, field_name: str) -> torch.Tensor:
-    value = torch.load(path, map_location="cpu", weights_only=False)
+def _normalise_embedding(value: Any, field_name: str, label: str) -> torch.Tensor:
     if not isinstance(value, torch.Tensor):
-        raise TypeError(f"{field_name} did not load to a Tensor: {path} -> {type(value).__name__}")
+        raise TypeError(f"{field_name} did not load to a Tensor: {label} -> {type(value).__name__}")
     if value.dim() == 3 and value.shape[0] == 1:
         value = value.squeeze(0)
     if value.dim() != 2:
-        raise ValueError(f"{field_name} must be rank-2 [seq, dim], got shape={tuple(value.shape)} at {path}")
+        raise ValueError(f"{field_name} must be rank-2 [seq, dim], got shape={tuple(value.shape)} at {label}")
     if value.shape[0] <= 0 or value.shape[1] <= 0:
-        raise ValueError(f"{field_name} is empty: shape={tuple(value.shape)} at {path}")
+        raise ValueError(f"{field_name} is empty: shape={tuple(value.shape)} at {label}")
     return value
+
+
+def _load_embedding(path: Path, field_name: str) -> torch.Tensor:
+    return _normalise_embedding(torch.load(path, map_location="cpu", weights_only=False), field_name, str(path))
 
 
 class LocalFireRedEditDataset(Dataset):
@@ -81,6 +98,8 @@ class LocalFireRedEditDataset(Dataset):
         instruction_field: str,
         embedding_field: str,
         uncond_embedding_field: str,
+        firered_project_root: Optional[str] = None,
+        allow_cos_fallback: bool = False,
     ) -> None:
         self.jsonl_path = Path(jsonl_path).expanduser()
         self.local_data_root = Path(local_data_root).expanduser()
@@ -91,11 +110,25 @@ class LocalFireRedEditDataset(Dataset):
         self.instruction_field = instruction_field
         self.embedding_field = embedding_field
         self.uncond_embedding_field = uncond_embedding_field
+        self.allow_cos_fallback = bool(allow_cos_fallback)
+        self._load_firered_image = None
+        self._load_firered_tensor = None
 
         if not self.jsonl_path.is_file():
             raise FileNotFoundError(f"JSONL missing: {self.jsonl_path}")
         if not self.local_data_root.is_dir():
             raise FileNotFoundError(f"local_data_root missing: {self.local_data_root}")
+        if self.allow_cos_fallback:
+            if os.environ.get("FIRERED_USE_COS", "0") != "1":
+                raise RuntimeError("allow_cos_fallback=true requires FIRERED_USE_COS=1")
+            if not firered_project_root:
+                raise ValueError("firered_project_root is required when allow_cos_fallback=true")
+            project_root = Path(str(firered_project_root)).expanduser()
+            if not project_root.is_dir():
+                raise FileNotFoundError(f"firered_project_root missing: {project_root}")
+            image_utils = _load_firered_image_utils(project_root)
+            self._load_firered_image = image_utils.load_image
+            self._load_firered_tensor = image_utils.load_tensor
 
         records = _read_jsonl(self.jsonl_path)
         if max_samples is not None:
@@ -127,15 +160,39 @@ class LocalFireRedEditDataset(Dataset):
                 f"at {item.get('jsonl_path')}:{item.get('jsonl_lineno')}"
             )
 
-        source_path = resolve_local_path(source_paths[0], self.local_data_root)
-        target_path = resolve_local_path(str(item[self.target_image_field]), self.local_data_root)
-        prompt_path = resolve_local_path(str(item[self.embedding_field]), self.local_data_root)
-        uncond_path = resolve_local_path(str(item[self.uncond_embedding_field]), self.local_data_root)
+        raw_source_path = source_paths[0]
+        raw_target_path = str(item[self.target_image_field])
+        raw_prompt_path = str(item[self.embedding_field])
+        raw_uncond_path = str(item[self.uncond_embedding_field])
 
-        source = _resize_center_crop(Image.open(source_path), self.height, self.width)
-        target = _resize_center_crop(Image.open(target_path), self.height, self.width)
-        prompt_embeds = _load_embedding(prompt_path, self.embedding_field)
-        uncond_embeds = _load_embedding(uncond_path, self.uncond_embedding_field)
+        if self.allow_cos_fallback:
+            assert self._load_firered_image is not None
+            assert self._load_firered_tensor is not None
+            source = _resize_center_crop(self._load_firered_image(raw_source_path), self.height, self.width)
+            target = _resize_center_crop(self._load_firered_image(raw_target_path), self.height, self.width)
+            prompt_embeds = _normalise_embedding(
+                self._load_firered_tensor(raw_prompt_path),
+                self.embedding_field,
+                raw_prompt_path,
+            )
+            uncond_embeds = _normalise_embedding(
+                self._load_firered_tensor(raw_uncond_path),
+                self.uncond_embedding_field,
+                raw_uncond_path,
+            )
+            source_path = raw_source_path
+            target_path = raw_target_path
+            prompt_path = raw_prompt_path
+            uncond_path = raw_uncond_path
+        else:
+            source_path = resolve_local_path(raw_source_path, self.local_data_root)
+            target_path = resolve_local_path(raw_target_path, self.local_data_root)
+            prompt_path = resolve_local_path(raw_prompt_path, self.local_data_root)
+            uncond_path = resolve_local_path(raw_uncond_path, self.local_data_root)
+            source = _resize_center_crop(Image.open(source_path), self.height, self.width)
+            target = _resize_center_crop(Image.open(target_path), self.height, self.width)
+            prompt_embeds = _load_embedding(prompt_path, self.embedding_field)
+            uncond_embeds = _load_embedding(uncond_path, self.uncond_embedding_field)
 
         return {
             "uid": str(item.get("uid", index)),

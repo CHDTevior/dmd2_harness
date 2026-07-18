@@ -75,10 +75,10 @@ train:
   save_final_checkpoint: true
   save_optimizer_state: true
   checkpoints_total_limit: 1
-  # Exact full state measures about 458 GiB; 600 GiB keeps 142 GiB write headroom.
-  checkpoint_expected_size_gb: 600
-  # Shared VEPFS cannot stage two 458G full states; retain only the newest state.
-  checkpoint_preclean_before_save: true
+  # Exact full state measures about 458 GiB. Retain the old complete state until
+  # the replacement is marked complete, so reserve room for both plus margin.
+  checkpoint_expected_size_gb: 1000
+  checkpoint_preclean_before_save: false
   precision_mode: bf16
   fsdp_backend: fsdp1
   fsdp_use_orig_params: false

@@ -10,14 +10,16 @@
 #SBATCH -t 2-00:00:00
 #SBATCH -o /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/logs/dmd2_firered_full_%j.out
 #SBATCH -e /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/logs/dmd2_firered_full_%j.err
+#SBATCH --open-mode=append
 
 set -euo pipefail
 
-PROJECT_DIR=/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_firered_porting_harness
-TWINFLOW_SRC=/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src
-FIRERED_ROOT=/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+TWINFLOW_SRC="${TWINFLOW_SRC:-/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src}"
+FIRERED_ROOT="${FIRERED_ROOT:-/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth}"
 LOG_DIR="${FIRERED_ROOT}/logs"
-CONFIG_ARG="${1:-${PROJECT_DIR}/configs/firered_gray_dmd2_full_shared.yaml}"
+CONFIG_ARG="${1:-${PROJECT_DIR}/configs/firered_gray_dmd2_full_official_cfg4_4nfe_1024_3k_lr5e6_dmd2renoise_gan.yaml}"
 CONDA_ENV="${CONDA_ENV:-red_train}"
 
 mkdir -p "${LOG_DIR}"
@@ -25,6 +27,7 @@ mkdir -p "${LOG_DIR}"
 echo "=============================="
 echo "Job started at: $(date)"
 echo "Job ID: ${SLURM_JOB_ID:-manual}"
+echo "Requeue restart count: ${SLURM_RESTART_COUNT:-0}"
 echo "Node(s): ${SLURM_NODELIST:-manual}"
 echo "Num nodes: ${SLURM_NNODES:-1}"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
@@ -136,6 +139,9 @@ export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-eth0}"
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NCCL_TIMEOUT="${NCCL_TIMEOUT:-1800}"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-10000}"
+export REDEDIT_NCCL_TIMEOUT_MIN="${REDEDIT_NCCL_TIMEOUT_MIN:-30}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 
@@ -153,78 +159,39 @@ echo "[Git]"
 git rev-parse HEAD
 git status --porcelain | sed -n '1,40p'
 
+echo "[Preflight] standalone"
+python scripts/preflight_firered_dmd2.py \
+  --config "${CONFIG_PATH}" \
+  --sample-check-count "${PREFLIGHT_SAMPLE_CHECK_COUNT:-1}"
+
 python - <<PY
-import json
-import os
 import shutil
-import sys
 from pathlib import Path
 from omegaconf import OmegaConf
 
 cfg_path = Path("${CONFIG_PATH}")
 cfg = OmegaConf.to_container(OmegaConf.load(cfg_path), resolve=True)
-model_path = Path(str(cfg["model"]["model_path"]))
-train_jsonl = [Path(str(p)) for p in cfg["data"]["train_jsonl"]]
-eval_jsonl = [Path(str(p)) for p in (cfg["eval"].get("eval_jsonl") or cfg["data"]["train_jsonl"])]
 output_base = Path(str(cfg["train"]["output_dir"]))
 exp_name = Path(cfg_path.parent.name) / cfg_path.stem
 resolved_output_dir = output_base / exp_name
 expected_gb = float(cfg["train"].get("checkpoint_expected_size_gb", 0) or 0)
+preclean_before_save = bool(cfg["train"].get("checkpoint_preclean_before_save", False))
+checkpoint_limit = int(cfg["train"].get("checkpoints_total_limit", 0) or 0)
 
-print("[Preflight] config:", cfg_path)
 print("[Preflight] output_dir:", resolved_output_dir)
-print("[Preflight] method_type:", cfg["method"]["method_type"])
-print("[Preflight] model_path:", model_path)
-print("[Preflight] max_train_steps:", cfg["train"]["max_train_steps"])
-print("[Preflight] save_every:", cfg["train"]["save_every"])
-print("[Preflight] eval_every:", cfg["eval"]["every_steps"])
-print("[Preflight] checkpoints_total_limit:", cfg["train"]["checkpoints_total_limit"])
-
-if cfg["method"]["method_type"] != "DMD2FullShared":
-    raise SystemExit("[ERR] method.method_type must be DMD2FullShared")
-if cfg["model"]["model_name"] != "QwenImageEdit":
-    raise SystemExit("[ERR] model.model_name must be QwenImageEdit")
-if float(cfg["sample"].get("cfg_scale", 0)) != 0 or float(cfg["eval"].get("cfg_scale", 0)) != 0:
-    raise SystemExit("[ERR] FireRed gray requires sample/eval cfg_scale=0")
-if int(cfg["train"]["save_every"]) != 500 or int(cfg["eval"]["every_steps"]) != 500:
-    raise SystemExit("[ERR] save/eval cadence must be 500 it")
-if int(cfg["train"]["checkpoints_total_limit"]) != 1:
-    raise SystemExit("[ERR] checkpoints_total_limit must be 1")
-if not os.environ.get("COS_SECRET_ID") or not os.environ.get("COS_SECRET_KEY"):
-    raise SystemExit("[ERR] COS credentials were not exported")
-if not model_path.is_dir():
-    raise SystemExit(f"[ERR] model_path missing: {model_path}")
-for rel in ("model_index.json", "transformer/config.json", "vae/config.json"):
-    if not (model_path / rel).is_file():
-        raise SystemExit(f"[ERR] missing model file: {model_path / rel}")
-for path in train_jsonl + eval_jsonl:
-    if not path.is_file():
-        raise SystemExit(f"[ERR] jsonl missing: {path}")
-    with path.open("r", encoding="utf-8") as f:
-        first = json.loads(next(line for line in f if line.strip()))
-    for key in ("source_image", "edit_image", cfg["data"]["embedding_field"], cfg["data"]["uncond_embedding_field"]):
-        if key not in first:
-            raise SystemExit(f"[ERR] first record missing key={key}: {path}")
-ref_manifest = Path(str(cfg["eval"].get("reference_manifest", "")))
-if not ref_manifest.is_file():
-    raise SystemExit(f"[ERR] eval.reference_manifest missing: {ref_manifest}")
-
-firered_utils = Path("${FIRERED_ROOT}") / "train" / "src"
-if str(firered_utils) not in sys.path:
-    sys.path.insert(0, str(firered_utils))
-from utils import image_utils
-image_utils.load_image(str(first["source_image"]))
-image_utils.load_tensor(str(first[cfg["data"]["embedding_field"]]))
-print("[Preflight] COS loader sample OK")
-
 resolved_output_dir.mkdir(parents=True, exist_ok=True)
 (resolved_output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 (resolved_output_dir / "offline_eval").mkdir(parents=True, exist_ok=True)
 free_gb = shutil.disk_usage(str(resolved_output_dir)).free / (1024**3)
 print(f"[Preflight] free_space_gib: {free_gb:.1f}")
 if expected_gb > 0 and free_gb < expected_gb:
-    raise SystemExit(f"[ERR] insufficient free space: free={free_gb:.1f}GiB expected_checkpoint={expected_gb:.1f}GiB")
-print("[Preflight] OK")
+    if not (preclean_before_save and checkpoint_limit > 0):
+        raise SystemExit(f"[ERR] insufficient free space: free={free_gb:.1f}GiB expected_checkpoint={expected_gb:.1f}GiB")
+    print(
+        "[Preflight] free space is below one full checkpoint, but the training "
+        "script will preclean retained checkpoints before its authoritative guard"
+    )
+print("[Preflight] output directory OK")
 PY
 
 export NNODES="${SLURM_NNODES:-1}"

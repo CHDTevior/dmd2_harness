@@ -1,5 +1,22 @@
 # Code Audit
 
+## Post-Audit Status Update (2026-07)
+
+The original audit identified two open items that have since been addressed in
+the supported full-model path:
+
+- The GAN classifier is now a Qwen middle-hidden-state head on the fake critic,
+  conditioned on edit/source token grids, prompt, and timestep. It replaces
+  the earlier latent-only placeholder.
+- The supported full run is now `DMD2FullOfficial` with a separate full fake
+  critic, frozen teacher, DMD2 re-noise sampler, explicit real/fake CFG
+  scales, and two checkpoint modes with fail-fast resume checks.
+
+Historical LoRA/shared-fake notes below remain useful for debugging context,
+but they are not the current full-official training protocol. See
+`docs/operational_lessons.md` and `docs/model_porting_runbook.md` for the
+current contract.
+
 ## Upstream DMD2 Issues To Fix Before FireRed Training
 
 1. `main/train_sd.py` assumes W&B online mode.

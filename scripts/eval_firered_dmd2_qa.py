@@ -31,7 +31,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
-TWINFLOW_SRC = Path("/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src")
+TWINFLOW_SRC = Path(
+    os.environ.get("TWINFLOW_SRC", "/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src")
+).expanduser()
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 if str(TWINFLOW_SRC) not in sys.path:
@@ -49,10 +51,10 @@ STUDENT_ADAPTER = "student"
 QA_LABELS = [
     "input",
     "orig_lora_vanilla_40",
-    "orig_lora_few_1nfe",
+    "orig_lora_dmd2_1nfe",
     "dmd2_1nfe",
-    "dmd2_few_2nfe",
-    "dmd2_few_4nfe",
+    "dmd2_2nfe",
+    "dmd2_4nfe",
     "target",
 ]
 
@@ -129,6 +131,10 @@ def get_inner_peft_model(wrapped_model):
     return module.transformer
 
 
+def has_adapter(peft_model, adapter_name: str) -> bool:
+    return adapter_name in getattr(peft_model, "peft_config", {})
+
+
 def configure_eval_adapters(wrapped_model, model_cfg: Dict, checkpoint: Path):
     target_modules = [item.strip() for item in str(model_cfg["lora_target_modules"]).split(",") if item.strip()]
     if not target_modules:
@@ -151,10 +157,12 @@ def configure_eval_adapters(wrapped_model, model_cfg: Dict, checkpoint: Path):
     inner_peft = get_inner_peft_model(wrapped_model)
     inner_peft.add_adapter(STUDENT_ADAPTER, lora_config)
 
-    teacher_path = as_path(model_cfg["teacher_adapter_path"], "model.teacher_adapter_path", must_dir=True)
+    teacher_path_raw = str(model_cfg.get("teacher_adapter_path", "") or "").strip()
+    if teacher_path_raw:
+        teacher_path = as_path(teacher_path_raw, "model.teacher_adapter_path", must_dir=True)
+        load_adapter_into(inner_peft, teacher_path, TEACHER_ADAPTER)
     student_path = checkpoint / "student_adapter" / STUDENT_ADAPTER
     as_path(str(student_path), "student adapter checkpoint", must_dir=True)
-    load_adapter_into(inner_peft, teacher_path, TEACHER_ADAPTER)
     load_adapter_into(inner_peft, student_path, STUDENT_ADAPTER)
 
     wrapped_model.transformer.requires_grad_(False)
@@ -210,9 +218,33 @@ def expand_time(t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     return t.view(t.shape[0], *([1] * (x.dim() - 1)))
 
 
+def flow_x0(x_t: torch.Tensor, t: torch.Tensor, velocity: torch.Tensor) -> torch.Tensor:
+    return x_t - expand_time(t, x_t) * velocity
+
+
+def renoise_x0(
+    x0: torch.Tensor,
+    t_next: float,
+    *,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if t_next <= 0.0:
+        return x0
+    noise = torch.randn(x0.shape, device=x0.device, dtype=x0.dtype, generator=generator)
+    t = torch.full((x0.shape[0],), t_next, device=x0.device, dtype=torch.float32)
+    return expand_time(t, x0) * noise + (1.0 - expand_time(t, x0)) * x0
+
+
 def forward_adapter(wrapped_model, inner_peft, adapter_name: str, x_t, t, prompt_embeds, prompt_mask, source_latents):
-    inner_peft.set_adapter(adapter_name)
     model_dtype = prompt_embeds.dtype
+    if adapter_name == TEACHER_ADAPTER and not has_adapter(inner_peft, adapter_name):
+        with inner_peft.disable_adapter():
+            return wrapped_model.transformer(
+                x_t.to(dtype=model_dtype),
+                t,
+                [prompt_embeds, prompt_mask, source_latents.to(dtype=model_dtype)],
+            )
+    inner_peft.set_adapter(adapter_name)
     return wrapped_model.transformer(
         x_t.to(dtype=model_dtype),
         t,
@@ -221,7 +253,7 @@ def forward_adapter(wrapped_model, inner_peft, adapter_name: str, x_t, t, prompt
 
 
 @torch.no_grad()
-def flow_sample_pixels(
+def dmd2_renoise_sample_pixels(
     wrapped_model,
     inner_peft,
     adapter_name: str,
@@ -231,6 +263,7 @@ def flow_sample_pixels(
     prompt_mask: torch.Tensor,
     source_latents: torch.Tensor,
     dtype: torch.dtype,
+    generator: torch.Generator,
 ) -> torch.Tensor:
     if steps <= 0:
         raise ValueError(f"steps must be positive, got {steps}")
@@ -251,7 +284,8 @@ def flow_sample_pixels(
                 prompt_mask,
                 source_latents,
             )
-        latents = (latents + (t_next - t_curr) * velocity).to(dtype=dtype)
+        x0 = flow_x0(latents, t, velocity).to(dtype=dtype)
+        latents = renoise_x0(x0, t_next, generator=generator).to(dtype=dtype)
     with torch_autocast(device_type="cuda", dtype=dtype, enabled=dtype != torch.float32, cache_enabled=False):
         return wrapped_model.latents_to_pixels(latents).detach()
 
@@ -261,7 +295,6 @@ def vanilla_teacher_pixels(wrapped_model, inner_peft, batch: Dict, device: torch
     pipe = wrapped_model.model
     if getattr(pipe, "text_encoder", None) is None:
         raise RuntimeError("Vanilla eval requires text_encoder")
-    inner_peft.set_adapter(TEACHER_ADAPTER)
 
     source_pil = tensor_to_pil(batch["source_image"][0])
     prompt = str(batch["text"][0])
@@ -270,20 +303,36 @@ def vanilla_teacher_pixels(wrapped_model, inner_peft, batch: Dict, device: torch
 
     original_transformer = pipe.transformer
     original_vae_image_size = _qpp_mod.VAE_IMAGE_SIZE
+    if has_adapter(inner_peft, TEACHER_ADAPTER):
+        inner_peft.set_adapter(TEACHER_ADAPTER)
     pipe.transformer = inner_peft
     _qpp_mod.VAE_IMAGE_SIZE = source_pil.width * source_pil.height
     try:
-        result = pipe(
-            image=[source_pil],
-            prompt=prompt,
-            generator=torch.Generator(device=device).manual_seed(seed),
-            true_cfg_scale=0.0,
-            negative_prompt=" ",
-            num_inference_steps=40,
-            num_images_per_prompt=1,
-            height=source_pil.height,
-            width=source_pil.width,
-        )
+        if has_adapter(inner_peft, TEACHER_ADAPTER):
+            result = pipe(
+                image=[source_pil],
+                prompt=prompt,
+                generator=torch.Generator(device=device).manual_seed(seed),
+                true_cfg_scale=4.0,
+                negative_prompt=" ",
+                num_inference_steps=40,
+                num_images_per_prompt=1,
+                height=source_pil.height,
+                width=source_pil.width,
+            )
+        else:
+            with inner_peft.disable_adapter():
+                result = pipe(
+                    image=[source_pil],
+                    prompt=prompt,
+                    generator=torch.Generator(device=device).manual_seed(seed),
+                    true_cfg_scale=4.0,
+                    negative_prompt=" ",
+                    num_inference_steps=40,
+                    num_images_per_prompt=1,
+                    height=source_pil.height,
+                    width=source_pil.width,
+                )
     finally:
         _qpp_mod.VAE_IMAGE_SIZE = original_vae_image_size
         pipe.transformer = original_transformer
@@ -303,6 +352,8 @@ def make_dataset(cfg: Dict) -> LocalFireRedEditDataset:
         instruction_field=data_cfg["instruction_field"],
         embedding_field=data_cfg["embedding_field"],
         uncond_embedding_field=data_cfg["uncond_embedding_field"],
+        firered_project_root=data_cfg.get("firered_project_root"),
+        allow_cos_fallback=bool(data_cfg.get("allow_cos_fallback", False)),
     )
 
 
@@ -369,6 +420,7 @@ def main() -> None:
         sample_seed = int(args.seed) + produced
         with torch.no_grad():
             source_latents = wrapped_model.pixels_to_latents(source).to(device=device, dtype=dtype)
+        generator = torch.Generator(device=device).manual_seed(sample_seed)
         noise = torch.randn(
             target.shape[0],
             wrapped_model.transformer.in_channels,
@@ -376,23 +428,23 @@ def main() -> None:
             target.shape[-1] // wrapped_model.model.vae_scale_factor,
             device=device,
             dtype=dtype,
-            generator=torch.Generator(device=device).manual_seed(sample_seed),
+            generator=generator,
         )
 
         outputs = {}
         vanilla = vanilla_teacher_pixels(wrapped_model, inner_peft, batch, device, sample_seed)
         outputs["orig_lora_vanilla_40"] = vanilla
-        outputs["orig_lora_few_1nfe"] = flow_sample_pixels(
-            wrapped_model, inner_peft, TEACHER_ADAPTER, noise, 1, prompt_embeds, prompt_mask, source_latents, dtype
+        outputs["orig_lora_dmd2_1nfe"] = dmd2_renoise_sample_pixels(
+            wrapped_model, inner_peft, TEACHER_ADAPTER, noise, 1, prompt_embeds, prompt_mask, source_latents, dtype, generator
         )
-        outputs["dmd2_1nfe"] = flow_sample_pixels(
-            wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 1, prompt_embeds, prompt_mask, source_latents, dtype
+        outputs["dmd2_1nfe"] = dmd2_renoise_sample_pixels(
+            wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 1, prompt_embeds, prompt_mask, source_latents, dtype, generator
         )
-        outputs["dmd2_few_2nfe"] = flow_sample_pixels(
-            wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 2, prompt_embeds, prompt_mask, source_latents, dtype
+        outputs["dmd2_2nfe"] = dmd2_renoise_sample_pixels(
+            wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 2, prompt_embeds, prompt_mask, source_latents, dtype, generator
         )
-        outputs["dmd2_few_4nfe"] = flow_sample_pixels(
-            wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 4, prompt_embeds, prompt_mask, source_latents, dtype
+        outputs["dmd2_4nfe"] = dmd2_renoise_sample_pixels(
+            wrapped_model, inner_peft, STUDENT_ADAPTER, noise, 4, prompt_embeds, prompt_mask, source_latents, dtype, generator
         )
 
         uid = str(batch["uid"][0])

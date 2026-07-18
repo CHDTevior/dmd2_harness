@@ -11,8 +11,11 @@
 
 set -euo pipefail
 
-PROJECT_DIR=/vepfs-cnbja62d5d769987/suntengjiao/distill/dmd2_firered_porting_harness
-LOG_DIR=/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/logs
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+FIRERED_ROOT="${FIRERED_ROOT:-/vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth}"
+TWINFLOW_SRC="${TWINFLOW_SRC:-/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src}"
+LOG_DIR="${FIRERED_ROOT}/logs"
 CONDA_SH=/vepfs-cnbja62d5d769987/suntengjiao/anaconda3/etc/profile.d/conda.sh
 CONDA_ENV=/vepfs-cnbja62d5d769987/suntengjiao/anaconda3/envs/twin_flow_qwen
 
@@ -46,7 +49,7 @@ source "${CONDA_SH}"
 conda activate "${CONDA_ENV}"
 
 cd "${PROJECT_DIR}"
-export PYTHONPATH="${PROJECT_DIR}/src:/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src:${PYTHONPATH:-}"
+export PYTHONPATH="${PROJECT_DIR}/src:${TWINFLOW_SRC}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export FIRERED_DISABLE_FLASH_ATTN=${FIRERED_DISABLE_FLASH_ATTN:-1}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
