@@ -1,15 +1,13 @@
-# Implementation Slots
+# FireRed DMD2 Utilities
 
-This package is intentionally a scaffold until FireRed DMD2 dryrun code is added.
+The production full-model trainer remains in
+`scripts/train_firered_dmd2_full_fsdp.py`. This package holds lightweight,
+testable boundaries shared by the harness:
 
-Planned modules:
+- `local_firered_data.py`: the historical local LoRA smoke dataset adapter.
+- `decoupled_dmd.py`: explicit re-noising, constrained/full CA scheduling,
+  coupled and decoupled x0-space gradients, and the shared normalizer.
 
-- `dataset.py`: JSONL dataset returning source latent, target latent, prompt embedding, uncond embedding, uid.
-- `modeling.py`: student, teacher, and fake-critic wrappers around QwenImageEdit.
-- `scheduler.py`: FireRed/Qwen conversion replacing SDXL `get_x0_from_noise`.
-- `losses.py`: DMD2 distribution matching and conditional GAN losses.
-- `eval.py`: contact sheet eval matching the TwinFlow comparison format.
-- `train.py`: one-batch dryrun, fastrun, resumable Slurm training.
-
-Do not copy SDXL-specific assumptions into these modules without an explicit adapter boundary.
-
+Keep scheduler and parameterization math in pure tensor functions where
+possible. FireRed uses velocity prediction and `x_t=t*noise+(1-t)*x0`; do not
+copy epsilon/DDPM formulas into this package.

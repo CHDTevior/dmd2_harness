@@ -1,0 +1,111 @@
+model:
+  model_name: QwenImageEdit
+  aux_time_embed: false
+  model_path: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/ckpts_gray_lora_merged_v1
+  drop_text_encoder: true
+
+data:
+  firered_project_root: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth
+  condition_mode: offline
+  height: 1024
+  width: 1024
+  train_jsonl:
+    - /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/clay_meta/clay/clay.jsonl
+  max_samples:
+  repeat: 1
+  instruction_field: instruction
+  embedding_field: embeddings_tensor_en
+  uncond_embedding_field: embeddings_tensor_droptext
+
+method:
+  method_type: DMD2FullOfficial
+  critic_mode: separate_full
+  decoupled_dmd: true
+  decoupled_ca_mode: constrained
+  ca_guidance_scale: 4.0
+  dm_noise_t_min: 0.02
+  dm_noise_t_max: 0.98
+  ca_noise_t_min: 0.02
+  ca_noise_t_max: 0.98
+  teacher_match_loss_weight: 0.0
+  dm_loss_weight: 1.0
+  fake_loss_weight: 1.0
+  gan_loss_weight: 5.0e-3
+  gan_classifier_loss_weight: 1.0e-2
+  gan_classifier_type: qwen_hidden_state
+  gan_feature_layer: 30
+  gan_classifier_hidden_channels: 128
+  gan_noise_t_min: 0.0
+  gan_noise_t_max: 0.98
+  real_guidance_scale: 4.0
+  fake_guidance_scale: 1.0
+  dfake_gen_update_ratio: 5
+  student_train_sampling_steps: 4
+  student_train_backprop_mode: single_step
+  sequential_backward: true
+  dm_grad_clip: 10.0
+  dm_grad_eps: 1.0e-6
+
+sample:
+  seed: 42
+  cfg_scale: 0
+  sampling_steps: 4
+  sampling_style: dmd2_renoise
+
+eval:
+  enabled: false
+  eval_jsonl:
+    - /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/clay_meta/clay/clay.jsonl
+  max_samples: 4
+  batch_size: 1
+  num_workers: 0
+  start_step: 250
+  every_steps: 250
+  cfg_scale: 0
+  seed: 42
+  sampling_steps: 4
+  sampling_style: dmd2_renoise
+  reference_manifest: /vepfs-cnbja62d5d769987/suntengjiao/distill/reports/firered_gray_twinflow_review_20260622/artifacts/orig_lora_vanilla_source_cfg4_20260625/source_cfg4_reference_manifest.json
+  reference_labels:
+    - orig_lora_source_40_cfg4
+  variants:
+    - label: ddmd_full_cfg4_gan_1nfe_1024
+      sampling_style: dmd2_renoise
+      sampling_steps: 1
+    - label: ddmd_full_cfg4_gan_2nfe_1024
+      sampling_style: dmd2_renoise
+      sampling_steps: 2
+    - label: ddmd_full_cfg4_gan_4nfe_1024
+      sampling_style: dmd2_renoise
+      sampling_steps: 4
+
+train:
+  checkpoint_mode: model_only_eval
+  load_checkpoint_path: ""
+  output_dir: /vepfs-cnbja62d5d769987/suntengjiao/distill/firered_gray_depth/outputs/ddmd_firered_gray_full_cfg4_gan_4nfe_1024_smoke100_lr5e6_hybrid_v1
+  seed: 42
+  grad_accumulation_steps: 1
+  micro_batch_size: 1
+  max_train_steps: 100
+  num_train_epochs: 1
+  num_workers: 4
+  lr: 5.0e-6
+  fake_lr: 5.0e-6
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  save_every: 250
+  save_final_checkpoint: false
+  save_optimizer_state: false
+  checkpoints_total_limit: 1
+  checkpoint_expected_size_gb: 0
+  checkpoint_preclean_before_save: true
+  precision_mode: bf16
+  fsdp_backend: fsdp1
+  fsdp_use_orig_params: false
+  fsdp_backward_prefetch: false
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  primary_num_steps: 4
+  candidate_num_steps: [1, 2, 4]
+  cfg_scale: 0

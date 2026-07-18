@@ -36,15 +36,25 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+HARNESS_ROOT = Path(__file__).resolve().parents[1]
 TWINFLOW_SRC = Path(
     os.environ.get("TWINFLOW_SRC", "/vepfs-cnbja62d5d769987/suntengjiao/TwinFlow/src")
 ).expanduser()
-if str(TWINFLOW_SRC) not in sys.path:
-    sys.path.insert(0, str(TWINFLOW_SRC))
+for path in (HARNESS_ROOT, TWINFLOW_SRC):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from data.firered_edit_jsonl_dataset import FireRedEditJsonlDataset, collate_firered_edit  # noqa: E402
 from networks import MODELS  # noqa: E402
 from services.tools import create_logger  # noqa: E402
+from src.dmd2_firered.decoupled_dmd import (  # noqa: E402
+    DMGradientOverrides,
+    decoupled_raw_gradient,
+    noised_latents_from_noise,
+    normalize_and_clip_gradient,
+    sample_constrained_ca_time,
+    sample_uniform_time,
+)
 from steerers.qwenimage.sft_ddp_lora_firered_edit import (  # noqa: E402
     SkipFirstBatchSampler,
     cleanup_old_checkpoints,
@@ -938,6 +948,27 @@ class DMD2FullOfficialMethod:
         self.dm_grad_eps = float(cfg.get("dm_grad_eps", 1.0e-6))
         self.real_guidance_scale = float(cfg.get("real_guidance_scale", cfg.get("train_cfg_scale", 1.0)))
         self.fake_guidance_scale = float(cfg.get("fake_guidance_scale", 1.0))
+        self.decoupled_dmd = bool(cfg.get("decoupled_dmd", False))
+        if self.decoupled_dmd:
+            required_ddmd_keys = {
+                "decoupled_ca_mode",
+                "ca_guidance_scale",
+                "dm_noise_t_min",
+                "dm_noise_t_max",
+                "ca_noise_t_min",
+                "ca_noise_t_max",
+            }
+            missing_ddmd_keys = sorted(required_ddmd_keys - set(cfg))
+            if missing_ddmd_keys:
+                raise ValueError(f"D-DMD config is missing explicit method keys: {missing_ddmd_keys}")
+        self.decoupled_ca_mode = str(cfg["decoupled_ca_mode"]) if self.decoupled_dmd else "disabled"
+        self.ca_guidance_scale = (
+            float(cfg["ca_guidance_scale"]) if self.decoupled_dmd else self.real_guidance_scale
+        )
+        self.dm_noise_t_min = float(cfg["dm_noise_t_min"]) if self.decoupled_dmd else 0.02
+        self.dm_noise_t_max = float(cfg["dm_noise_t_max"]) if self.decoupled_dmd else 0.98
+        self.ca_noise_t_min = float(cfg["ca_noise_t_min"]) if self.decoupled_dmd else 0.02
+        self.ca_noise_t_max = float(cfg["ca_noise_t_max"]) if self.decoupled_dmd else 0.98
         self.student_train_sampling_steps = int(cfg.get("student_train_sampling_steps", 1))
         self.student_train_backprop_mode = str(cfg.get("student_train_backprop_mode", "single_step"))
         self.dfake_gen_update_ratio = int(cfg.get("dfake_gen_update_ratio", 1))
@@ -962,6 +993,32 @@ class DMD2FullOfficialMethod:
                 "method.student_train_backprop_mode must be one of "
                 f"single_step/full_rollout, got {self.student_train_backprop_mode!r}"
             )
+        if self.decoupled_dmd:
+            if self.decoupled_ca_mode not in {"constrained", "full"}:
+                raise ValueError(
+                    "method.decoupled_ca_mode must be constrained or full, "
+                    f"got {self.decoupled_ca_mode!r}"
+                )
+            if self.ca_guidance_scale <= 1.0:
+                raise ValueError(
+                    "D-DMD requires method.ca_guidance_scale > 1.0, "
+                    f"got {self.ca_guidance_scale}"
+                )
+            for label, low, high in (
+                ("dm", self.dm_noise_t_min, self.dm_noise_t_max),
+                ("ca", self.ca_noise_t_min, self.ca_noise_t_max),
+            ):
+                if not 0.0 <= low < high <= 1.0:
+                    raise ValueError(
+                        f"method.{label}_noise_t_min/max must satisfy 0 <= min < max <= 1, "
+                        f"got min={low} max={high}"
+                    )
+            min_generator_t = 1.0 / float(self.student_train_sampling_steps)
+            if self.decoupled_ca_mode == "constrained" and self.ca_noise_t_min >= min_generator_t:
+                raise ValueError(
+                    "Focused CA would have an empty interval at the final selected student stage: "
+                    f"ca_noise_t_min={self.ca_noise_t_min} min_generator_t={min_generator_t}"
+                )
         if self.dfake_gen_update_ratio <= 0:
             raise ValueError(f"method.dfake_gen_update_ratio must be positive, got {self.dfake_gen_update_ratio}")
         if self.gan_loss_weight < 0.0:
@@ -988,7 +1045,7 @@ class DMD2FullOfficialMethod:
 
     @property
     def requires_uncond(self) -> bool:
-        return self.real_guidance_scale > 1.0
+        return self.decoupled_dmd or self.real_guidance_scale > 1.0
 
     @staticmethod
     def expand_time(t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -1111,7 +1168,7 @@ class DMD2FullOfficialMethod:
         prompt_mask: torch.Tensor,
         source_latents: torch.Tensor,
         dtype: torch.dtype,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         latents = initial_latents
         batch_size = int(latents.shape[0])
         for idx in range(self.student_train_sampling_steps):
@@ -1129,7 +1186,13 @@ class DMD2FullOfficialMethod:
             )
             x0 = self.flow_x0(latents, t, velocity)
             latents = self.renoise_x0(x0, t_next)
-        return latents
+        final_t = torch.full(
+            (batch_size,),
+            1.0 / float(self.student_train_sampling_steps),
+            device=latents.device,
+            dtype=torch.float32,
+        )
+        return latents, final_t
 
     def student_train_sample(
         self,
@@ -1140,7 +1203,7 @@ class DMD2FullOfficialMethod:
         prompt_mask: torch.Tensor,
         source_latents: torch.Tensor,
         dtype: torch.dtype,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.student_train_backprop_mode == "full_rollout":
             return self.student_rollout(
                 initial_latents=initial_latents,
@@ -1192,7 +1255,7 @@ class DMD2FullOfficialMethod:
             source_latents=source_latents,
             dtype=dtype,
         )
-        return self.flow_x0(latents, t, velocity)
+        return self.flow_x0(latents, t, velocity), t
 
     @staticmethod
     def require_finite(loss: torch.Tensor, name: str) -> None:
@@ -1217,15 +1280,23 @@ class DMD2FullOfficialMethod:
         backward_scale: float,
         compute_student_gradient: bool,
         debug_prefix: str = "",
+        dm_gradient_overrides: DMGradientOverrides | None = None,
     ) -> tuple[torch.Tensor, dict]:
         batch_size = int(target_latents.shape[0])
         device = target_latents.device
         if self.uses_gan and (gan_classifier_gen_fn is None or gan_classifier_train_fn is None):
             raise RuntimeError("GAN loss is enabled but GAN classifier module was not provided")
+        metric_zero = target_latents.float().new_zeros(())
+        t_gen_mean = metric_zero
+        t_dm_mean = metric_zero
+        t_ca_mean = metric_zero
+        delta_dm_norm = metric_zero
+        delta_ca_norm = metric_zero
+        ca_constraint_violation = metric_zero
 
         if compute_student_gradient:
             gen_noise = torch.randn_like(target_latents)
-            student_x0 = self.student_train_sample(
+            student_x0, t_gen = self.student_train_sample(
                 initial_latents=gen_noise,
                 student_model_fn=student_model_fn,
                 prompt_embeds=prompt_embeds,
@@ -1233,43 +1304,152 @@ class DMD2FullOfficialMethod:
                 source_latents=source_latents,
                 dtype=dtype,
             )
+            t_gen_mean = t_gen.detach().float().mean()
             with torch.no_grad():
-                t_dm = self.sample_t(batch_size, device)
-                dm_noise = torch.randn_like(student_x0)
-                dm_x_t = self.expand_time(t_dm, student_x0) * dm_noise + (
-                    1.0 - self.expand_time(t_dm, student_x0)
-                ) * student_x0.detach()
-                real_v = self.predict_guided_velocity(
-                    model_fn=teacher_model_fn,
-                    x_t=dm_x_t,
-                    t=t_dm,
-                    prompt_embeds=prompt_embeds,
-                    prompt_mask=prompt_mask,
-                    uncond_embeds=uncond_embeds,
-                    uncond_mask=uncond_mask,
-                    source_latents=source_latents,
-                    dtype=dtype,
-                    guidance_scale=self.real_guidance_scale,
-                )
-                fake_v = self.predict_cond_velocity(
-                    model_fn=fake_model_fn,
-                    x_t=dm_x_t,
-                    t=t_dm,
-                    prompt_embeds=prompt_embeds,
-                    prompt_mask=prompt_mask,
-                    source_latents=source_latents,
-                    dtype=dtype,
-                )
-                pred_real_x0 = self.flow_x0(dm_x_t, t_dm, real_v)
-                pred_fake_x0 = self.flow_x0(dm_x_t, t_dm, fake_v)
-                dm_grad = (pred_fake_x0 - pred_real_x0).detach()
-                dm_norm = dm_grad.abs().mean().clamp_min(self.dm_grad_eps)
-                dm_grad = torch.nan_to_num(
-                    dm_grad / dm_norm,
-                    nan=0.0,
-                    posinf=self.dm_grad_clip,
-                    neginf=-self.dm_grad_clip,
-                ).clamp(-self.dm_grad_clip, self.dm_grad_clip)
+                if self.decoupled_dmd:
+                    if dm_gradient_overrides is None:
+                        t_dm = sample_uniform_time(
+                            batch_size=batch_size,
+                            device=device,
+                            low=self.dm_noise_t_min,
+                            high=self.dm_noise_t_max,
+                        )
+                        if self.decoupled_ca_mode == "constrained":
+                            t_ca = sample_constrained_ca_time(
+                                t_gen=t_gen.detach(),
+                                low=self.ca_noise_t_min,
+                                high=self.ca_noise_t_max,
+                            )
+                        else:
+                            t_ca = sample_uniform_time(
+                                batch_size=batch_size,
+                                device=device,
+                                low=self.ca_noise_t_min,
+                                high=self.ca_noise_t_max,
+                            )
+                        dm_noise = torch.randn_like(student_x0)
+                        ca_noise = torch.randn_like(student_x0)
+                    else:
+                        if dm_gradient_overrides.t_ca is None or dm_gradient_overrides.ca_noise is None:
+                            raise ValueError("D-DMD overrides require explicit t_ca and ca_noise")
+                        t_dm = dm_gradient_overrides.t_dm.to(device=device, dtype=torch.float32)
+                        t_ca = dm_gradient_overrides.t_ca.to(device=device, dtype=torch.float32)
+                        dm_noise = dm_gradient_overrides.dm_noise.to(device=device, dtype=student_x0.dtype)
+                        ca_noise = dm_gradient_overrides.ca_noise.to(device=device, dtype=student_x0.dtype)
+                    dm_x_t = noised_latents_from_noise(student_x0.detach(), t_dm, dm_noise)
+                    ca_x_t = noised_latents_from_noise(student_x0.detach(), t_ca, ca_noise)
+
+                    real_cond_dm_v = self.predict_cond_velocity(
+                        model_fn=teacher_model_fn,
+                        x_t=dm_x_t,
+                        t=t_dm,
+                        prompt_embeds=prompt_embeds,
+                        prompt_mask=prompt_mask,
+                        source_latents=source_latents,
+                        dtype=dtype,
+                    )
+                    fake_cond_dm_v = self.predict_cond_velocity(
+                        model_fn=fake_model_fn,
+                        x_t=dm_x_t,
+                        t=t_dm,
+                        prompt_embeds=prompt_embeds,
+                        prompt_mask=prompt_mask,
+                        source_latents=source_latents,
+                        dtype=dtype,
+                    )
+                    real_cond_ca_v = self.predict_cond_velocity(
+                        model_fn=teacher_model_fn,
+                        x_t=ca_x_t,
+                        t=t_ca,
+                        prompt_embeds=prompt_embeds,
+                        prompt_mask=prompt_mask,
+                        source_latents=source_latents,
+                        dtype=dtype,
+                    )
+                    if uncond_embeds is None or uncond_mask is None:
+                        raise RuntimeError("D-DMD CA requires unconditional prompt embeddings")
+                    real_uncond_ca_v = self.predict_cond_velocity(
+                        model_fn=teacher_model_fn,
+                        x_t=ca_x_t,
+                        t=t_ca,
+                        prompt_embeds=uncond_embeds,
+                        prompt_mask=uncond_mask,
+                        source_latents=source_latents,
+                        dtype=dtype,
+                    )
+                    pred_real_cond_dm_x0 = self.flow_x0(dm_x_t, t_dm, real_cond_dm_v)
+                    pred_fake_cond_dm_x0 = self.flow_x0(dm_x_t, t_dm, fake_cond_dm_v)
+                    pred_real_cond_ca_x0 = self.flow_x0(ca_x_t, t_ca, real_cond_ca_v)
+                    pred_real_uncond_ca_x0 = self.flow_x0(ca_x_t, t_ca, real_uncond_ca_v)
+                    dm_grad_raw, delta_dm, delta_ca = decoupled_raw_gradient(
+                        fake_dm_x0=pred_fake_cond_dm_x0,
+                        real_cond_dm_x0=pred_real_cond_dm_x0,
+                        real_cond_ca_x0=pred_real_cond_ca_x0,
+                        real_uncond_ca_x0=pred_real_uncond_ca_x0,
+                        guidance_scale=self.ca_guidance_scale,
+                    )
+                    dm_grad, _ = normalize_and_clip_gradient(
+                        dm_grad_raw.detach(),
+                        eps=self.dm_grad_eps,
+                        clip=self.dm_grad_clip,
+                    )
+                    t_dm_mean = t_dm.detach().float().mean()
+                    t_ca_mean = t_ca.detach().float().mean()
+                    delta_dm_norm = delta_dm.detach().float().abs().mean()
+                    delta_ca_norm = delta_ca.detach().float().abs().mean()
+                    if self.decoupled_ca_mode == "constrained":
+                        ca_upper = torch.minimum(
+                            t_gen.detach().float(),
+                            torch.full_like(t_gen.detach().float(), self.ca_noise_t_max),
+                        )
+                    else:
+                        ca_upper = torch.full_like(t_ca, self.ca_noise_t_max)
+                    ca_constraint_violation = (
+                        (t_ca < self.ca_noise_t_min) | (t_ca >= ca_upper)
+                    ).detach().float().max()
+                else:
+                    if dm_gradient_overrides is None:
+                        t_dm = self.sample_t(batch_size, device)
+                        dm_noise = torch.randn_like(student_x0)
+                    else:
+                        t_dm = dm_gradient_overrides.t_dm.to(device=device, dtype=torch.float32)
+                        dm_noise = dm_gradient_overrides.dm_noise.to(device=device, dtype=student_x0.dtype)
+                    dm_x_t = self.expand_time(t_dm, student_x0) * dm_noise + (
+                        1.0 - self.expand_time(t_dm, student_x0)
+                    ) * student_x0.detach()
+                    real_v = self.predict_guided_velocity(
+                        model_fn=teacher_model_fn,
+                        x_t=dm_x_t,
+                        t=t_dm,
+                        prompt_embeds=prompt_embeds,
+                        prompt_mask=prompt_mask,
+                        uncond_embeds=uncond_embeds,
+                        uncond_mask=uncond_mask,
+                        source_latents=source_latents,
+                        dtype=dtype,
+                        guidance_scale=self.real_guidance_scale,
+                    )
+                    fake_v = self.predict_cond_velocity(
+                        model_fn=fake_model_fn,
+                        x_t=dm_x_t,
+                        t=t_dm,
+                        prompt_embeds=prompt_embeds,
+                        prompt_mask=prompt_mask,
+                        source_latents=source_latents,
+                        dtype=dtype,
+                    )
+                    pred_real_x0 = self.flow_x0(dm_x_t, t_dm, real_v)
+                    pred_fake_x0 = self.flow_x0(dm_x_t, t_dm, fake_v)
+                    dm_grad = (pred_fake_x0 - pred_real_x0).detach()
+                    dm_norm = dm_grad.abs().mean().clamp_min(self.dm_grad_eps)
+                    dm_grad = torch.nan_to_num(
+                        dm_grad / dm_norm,
+                        nan=0.0,
+                        posinf=self.dm_grad_clip,
+                        neginf=-self.dm_grad_clip,
+                    ).clamp(-self.dm_grad_clip, self.dm_grad_clip)
+                    t_dm_mean = t_dm.detach().float().mean()
+                    delta_dm_norm = (pred_fake_x0 - pred_real_x0).detach().float().abs().mean()
                 dm_target = (student_x0 - dm_grad).detach()
             loss_teacher = student_x0.float().new_zeros(())
             loss_dm = 0.5 * F.mse_loss(student_x0.float(), dm_target.float())
@@ -1301,7 +1481,7 @@ class DMD2FullOfficialMethod:
         else:
             with torch.no_grad():
                 gen_noise = torch.randn_like(target_latents)
-                generated_latents = self.student_train_sample(
+                generated_latents, t_gen = self.student_train_sample(
                     initial_latents=gen_noise,
                     student_model_fn=student_model_fn,
                     prompt_embeds=prompt_embeds,
@@ -1310,6 +1490,7 @@ class DMD2FullOfficialMethod:
                     dtype=dtype,
                 )
                 generated_latents = generated_latents.detach()
+                t_gen_mean = t_gen.detach().float().mean()
             loss_teacher = generated_latents.float().new_zeros(())
             loss_dm = generated_latents.float().new_zeros(())
             loss_student = generated_latents.float().new_zeros(())
@@ -1389,6 +1570,12 @@ class DMD2FullOfficialMethod:
             "loss_gan_classifier": loss_gan_classifier.detach(),
             "gan_logits_real": gan_logits_real_mean.detach(),
             "gan_logits_fake": gan_logits_fake_mean.detach(),
+            "t_gen_mean": t_gen_mean.detach(),
+            "t_dm_mean": t_dm_mean.detach(),
+            "t_ca_mean": t_ca_mean.detach(),
+            "delta_dm_norm": delta_dm_norm.detach(),
+            "delta_ca_norm": delta_ca_norm.detach(),
+            "ca_constraint_violation": ca_constraint_violation.detach(),
             "generator_updated": torch.tensor(
                 1.0 if compute_student_gradient else 0.0,
                 device=device,
@@ -1442,6 +1629,12 @@ def all_reduce_mean(value: torch.Tensor, world_size: int) -> float:
     reduced = value.detach().float().clone()
     dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
     return float(reduced.item() / world_size)
+
+
+def all_reduce_max(value: torch.Tensor) -> float:
+    reduced = value.detach().float().clone()
+    dist.all_reduce(reduced, op=dist.ReduceOp.MAX)
+    return float(reduced.item())
 
 
 def cuda_barrier(local_rank: int) -> None:
@@ -1859,6 +2052,42 @@ def validate_config(config: dict) -> None:
         raise ValueError("method.critic_mode must be separate_full")
     if str(method_cfg.get("student_train_backprop_mode", "single_step")) not in {"single_step", "full_rollout"}:
         raise ValueError("method.student_train_backprop_mode must be single_step or full_rollout")
+    decoupled_dmd = bool(method_cfg.get("decoupled_dmd", False))
+    if decoupled_dmd:
+        required_ddmd_keys = {
+            "decoupled_ca_mode",
+            "ca_guidance_scale",
+            "dm_noise_t_min",
+            "dm_noise_t_max",
+            "ca_noise_t_min",
+            "ca_noise_t_max",
+        }
+        missing_ddmd_keys = sorted(required_ddmd_keys - set(method_cfg))
+        if missing_ddmd_keys:
+            raise ValueError(f"D-DMD config is missing explicit method keys: {missing_ddmd_keys}")
+        if str(method_cfg["decoupled_ca_mode"]) not in {"constrained", "full"}:
+            raise ValueError("method.decoupled_ca_mode must be constrained or full")
+        if float(method_cfg["ca_guidance_scale"]) <= 1.0:
+            raise ValueError("method.ca_guidance_scale must be > 1.0")
+        for label in ("dm", "ca"):
+            low = float(method_cfg[f"{label}_noise_t_min"])
+            high = float(method_cfg[f"{label}_noise_t_max"])
+            if not 0.0 <= low < high <= 1.0:
+                raise ValueError(
+                    f"method.{label}_noise_t_min/max must satisfy 0 <= min < max <= 1, "
+                    f"got min={low} max={high}"
+                )
+        min_generator_t = 1.0 / float(int(method_cfg["student_train_sampling_steps"]))
+        if (
+            str(method_cfg["decoupled_ca_mode"]) == "constrained"
+            and float(method_cfg["ca_noise_t_min"]) >= min_generator_t
+        ):
+            raise ValueError(
+                "D-DMD focused CA interval is empty at the final selected student stage: "
+                f"ca_noise_t_min={method_cfg['ca_noise_t_min']} min_generator_t={min_generator_t}"
+            )
+        if bool(config["train"].get("gradient_checkpointing_use_reentrant", False)):
+            raise ValueError("D-DMD FSDP requires train.gradient_checkpointing_use_reentrant=false")
     if float(method_cfg.get("real_guidance_scale", method_cfg.get("train_cfg_scale", 0.0))) <= 1.0:
         raise ValueError("method.real_guidance_scale must be > 1.0")
     if float(method_cfg.get("fake_guidance_scale", 1.0)) != 1.0:
@@ -2037,6 +2266,18 @@ def main() -> None:
         "critic_mode": method_cfg.get("critic_mode", "separate_full"),
         "student_train_sampling_steps": int(method_cfg.get("student_train_sampling_steps", 1)),
         "student_train_backprop_mode": str(method_cfg.get("student_train_backprop_mode", "single_step")),
+        "decoupled_dmd": bool(method_cfg.get("decoupled_dmd", False)),
+        "decoupled_ca_mode": str(method_cfg.get("decoupled_ca_mode", "disabled")),
+        "ca_guidance_scale_effective": float(
+            method_cfg.get(
+                "ca_guidance_scale",
+                method_cfg.get("real_guidance_scale", method_cfg.get("train_cfg_scale", 0.0)),
+            )
+        ),
+        "dm_noise_t_min": float(method_cfg.get("dm_noise_t_min", 0.02)),
+        "dm_noise_t_max": float(method_cfg.get("dm_noise_t_max", 0.98)),
+        "ca_noise_t_min": float(method_cfg.get("ca_noise_t_min", 0.02)),
+        "ca_noise_t_max": float(method_cfg.get("ca_noise_t_max", 0.98)),
         "real_guidance_scale": float(method_cfg.get("real_guidance_scale", method_cfg.get("train_cfg_scale", 0.0))),
         "fake_guidance_scale": float(method_cfg.get("fake_guidance_scale", 1.0)),
         "dfake_gen_update_ratio": int(method_cfg.get("dfake_gen_update_ratio", 1)),
@@ -2352,6 +2593,7 @@ def main() -> None:
         logger.info(
             "Running FireRed DMD2 full FSDP: records=%d world=%d micro_batch=%d steps_per_epoch=%d "
             "max_train_steps=%d output=%s method=%s student_nfe=%d backprop=%s real_cfg=%.3f fake_cfg=%.3f "
+            "decoupled=%s ca_mode=%s ca_cfg=%.3f dm_t=[%.3f,%.3f] ca_t=[%.3f,%.3f] "
             "dfake_ratio=%d lr=%.2e fake_lr=%.2e gan_gen=%.3g gan_cls=%.3g",
             len(dataset),
             world_size,
@@ -2364,6 +2606,13 @@ def main() -> None:
             checkpoint_metadata["student_train_backprop_mode"],
             checkpoint_metadata["real_guidance_scale"],
             checkpoint_metadata["fake_guidance_scale"],
+            checkpoint_metadata["decoupled_dmd"],
+            checkpoint_metadata["decoupled_ca_mode"],
+            checkpoint_metadata["ca_guidance_scale_effective"],
+            checkpoint_metadata["dm_noise_t_min"],
+            checkpoint_metadata["dm_noise_t_max"],
+            checkpoint_metadata["ca_noise_t_min"],
+            checkpoint_metadata["ca_noise_t_max"],
             checkpoint_metadata["dfake_gen_update_ratio"],
             float(config["train"]["lr"]),
             float(config["train"].get("fake_lr", config["train"]["lr"])),
@@ -2527,10 +2776,17 @@ def main() -> None:
                     next_step_in_epoch = step_in_epoch + 1
 
                     avg = {name: all_reduce_mean(value, world_size) for name, value in metrics.items()}
+                    ca_violation_max = all_reduce_max(metrics["ca_constraint_violation"])
+                    avg["ca_constraint_violation"] = ca_violation_max
+                    if ca_violation_max != 0.0:
+                        raise RuntimeError(
+                            "D-DMD CA schedule constraint was violated on at least one distributed rank"
+                        )
                     if is_main_process(rank):
                         logger.info(
                             "step=%08d loss=%.6f student=%.6f teacher=%.6f dm=%.6f fake=%.6f "
                             "gan_gen=%.6f gan_cls=%.6f gan_real=%.4f gan_fake=%.4f gen_update=%.0f "
+                            "t_gen=%.4f t_dm=%.4f t_ca=%.4f delta_dm=%.6f delta_ca=%.6f ca_violation=%.0f "
                             "grad_norm=%.4f fake_grad_norm=%.4f step_time=%.2fs uid=%s",
                             global_step,
                             avg["loss"],
@@ -2543,6 +2799,12 @@ def main() -> None:
                             avg["gan_logits_real"],
                             avg["gan_logits_fake"],
                             avg["generator_updated"],
+                            avg["t_gen_mean"],
+                            avg["t_dm_mean"],
+                            avg["t_ca_mean"],
+                            avg["delta_dm_norm"],
+                            avg["delta_ca_norm"],
+                            avg["ca_constraint_violation"],
                             float(grad_norm),
                             float(fake_grad_norm),
                             time.time() - start_time,

@@ -25,6 +25,13 @@ The supported FireRed path is `DMD2FullOfficial`:
 The older `DMD2FullShared`, `few`, and local LoRA paths are historical debug
 artifacts. They are not the current official FireRed DMD2 protocol.
 
+The `feat/d-dmd-firered` branch additionally supports D-DMD's decoupled
+distribution-matching and CFG-augmentation schedules. It supports both
+decoupled-full (paper config ②) and Decoupled-Hybrid (paper config ④), with
+single-step or full-rollout student backprop. The first production baseline is
+full-model, `single_step`, constrained CA, and keeps the same Qwen hidden-state
+GAN regularizer as the FireRed DMD2 control.
+
 ## What Has Been Verified
 
 - The upstream SDXL 4-step LoRA smoke passes. Its artifact is in
@@ -38,7 +45,7 @@ artifacts. They are not the current official FireRed DMD2 protocol.
 
 ## Use The Harness
 
-Set paths in a copied config for the local cluster. The two checked-in configs
+Set paths in a copied config for the local cluster. The checked-in configs
 are concrete FireRed templates:
 
 - `configs/firered_gray_dmd2_full_official_cfg4_4nfe_1024_3k_lr5e6_dmd2renoise_gan.yaml`
@@ -46,12 +53,15 @@ are concrete FireRed templates:
 - `configs/firered_gray_dmd2_full_official_cfg4_gan_student1_infer1_1024_3k_lr5e7_modelonly_v1.yaml`
   is the model-only 1/1-NFE example. It saves inference weights only and is
   deliberately not resumable.
+- `configs/firered_gray_ddmd_full_cfg4_gan_4nfe_1024_3k_lr5e6_hybrid_v1.yaml`
+  is the first D-DMD treatment: 4-NFE single-step student, teacher/CA CFG 4,
+  independent DM/CA re-noising, constrained CA schedule, 1024, and GAN loss.
 
 Run preflight before requesting GPUs:
 
 ```bash
 python scripts/preflight_firered_dmd2.py \
-  --config configs/firered_gray_dmd2_full_official_cfg4_4nfe_1024_3k_lr5e6_dmd2renoise_gan.yaml
+  --config configs/firered_gray_ddmd_full_cfg4_gan_4nfe_1024_3k_lr5e6_hybrid_v1.yaml
 ```
 
 For a 1024 two-node Slurm run, override every resource dimension rather than
@@ -59,7 +69,7 @@ only passing `-N 2`:
 
 ```bash
 sbatch \
-  --job-name=dmd2_firered_4nfe \
+  --job-name=ddmd_firered_4nfe \
   --partition=<site-gpu-partition> \
   --nodes=2 \
   --ntasks=2 \
@@ -68,7 +78,7 @@ sbatch \
   --time=2-00:00:00 \
   --export=ALL,MASTER_PORT=19611 \
   scripts/sbatch_firered_dmd2_full_fsdp.sh \
-  configs/firered_gray_dmd2_full_official_cfg4_4nfe_1024_3k_lr5e6_dmd2renoise_gan.yaml
+  configs/firered_gray_ddmd_full_cfg4_gan_4nfe_1024_3k_lr5e6_hybrid_v1.yaml
 ```
 
 The sbatch wrapper resolves a routable IPv4 master address and obtains local
@@ -111,6 +121,8 @@ GAN, optimizer, or RNG state.
   corresponding guardrails.
 - `docs/dmd2_method_notes.md`: upstream DMD2 mapping.
 - `docs/code_audit.md`: original port audit and status.
+- `docs/decoupled_dmd.md`: D-DMD equations, time-convention mapping, tests,
+  metrics, and the first controlled baseline.
 
 ## Publish Guard
 

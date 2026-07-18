@@ -10,6 +10,28 @@ full-official implementation. They are retained as historical smoke/debug
 records and are intentionally rejected by the current full trainer. Do not use
 them as templates for a new experiment.
 
+For D-DMD, use the `firered_gray_ddmd_full_*` configs. Every D-DMD constructor
+requires all schedule fields to be explicit. `constrained` is paper config ④;
+`full` is the decoupled-full config ② used by the equivalence regression:
+
+```yaml
+method:
+  decoupled_dmd: true
+  decoupled_ca_mode: constrained
+  ca_guidance_scale: 4.0
+  dm_noise_t_min: 0.02
+  dm_noise_t_max: 0.98
+  ca_noise_t_min: 0.02
+  ca_noise_t_max: 0.98
+  student_train_backprop_mode: single_step  # full_rollout is also accepted
+train:
+  gradient_checkpointing_use_reentrant: false
+```
+
+The 100-step D-DMD smoke config disables eval and final checkpoint saving. The
+3K treatment keeps the established 250-step evaluation cadence and retains one
+model-only checkpoint.
+
 Choose one checkpoint policy explicitly:
 
 - `model_only_eval`: single student inference checkpoint; no resume.

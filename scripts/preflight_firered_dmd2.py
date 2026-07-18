@@ -200,6 +200,42 @@ def validate_full_official_protocol(cfg: dict, cfg_path: Path, sample_check_coun
         fail("method.student_train_sampling_steps must be positive")
     if str(method_cfg.get("student_train_backprop_mode", "single_step")) not in {"single_step", "full_rollout"}:
         fail("method.student_train_backprop_mode must be single_step or full_rollout")
+    decoupled_dmd = bool(method_cfg.get("decoupled_dmd", False))
+    if decoupled_dmd:
+        required_ddmd_keys = {
+            "decoupled_ca_mode",
+            "ca_guidance_scale",
+            "dm_noise_t_min",
+            "dm_noise_t_max",
+            "ca_noise_t_min",
+            "ca_noise_t_max",
+        }
+        missing_ddmd_keys = sorted(required_ddmd_keys - set(method_cfg))
+        if missing_ddmd_keys:
+            fail(f"D-DMD config is missing explicit method keys: {missing_ddmd_keys}")
+        if str(method_cfg["decoupled_ca_mode"]) not in {"constrained", "full"}:
+            fail("method.decoupled_ca_mode must be constrained or full")
+        if float(method_cfg["ca_guidance_scale"]) <= 1.0:
+            fail("method.ca_guidance_scale must be > 1.0")
+        for label in ("dm", "ca"):
+            low = float(method_cfg[f"{label}_noise_t_min"])
+            high = float(method_cfg[f"{label}_noise_t_max"])
+            if not 0.0 <= low < high <= 1.0:
+                fail(
+                    f"method.{label}_noise_t_min/max must satisfy 0 <= min < max <= 1, "
+                    f"got min={low} max={high}"
+                )
+        min_generator_t = 1.0 / float(int(method_cfg["student_train_sampling_steps"]))
+        if (
+            str(method_cfg["decoupled_ca_mode"]) == "constrained"
+            and float(method_cfg["ca_noise_t_min"]) >= min_generator_t
+        ):
+            fail(
+                "D-DMD focused CA interval is empty at the final selected student stage: "
+                f"ca_noise_t_min={method_cfg['ca_noise_t_min']} min_generator_t={min_generator_t}"
+            )
+        if bool(train_cfg.get("gradient_checkpointing_use_reentrant", False)):
+            fail("D-DMD FSDP requires train.gradient_checkpointing_use_reentrant=false")
     if int(method_cfg.get("dfake_gen_update_ratio", 1)) <= 0:
         fail("method.dfake_gen_update_ratio must be positive")
     if float(method_cfg.get("teacher_match_loss_weight", 0.0)) != 0.0:
